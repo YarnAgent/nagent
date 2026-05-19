@@ -1,10 +1,8 @@
 # nagent
 
-> Brief one-line description of the project.
-
-## Overview
-
-TBD — high-level architectural overview goes here.
+> Agent net — a decentralized mesh CLI for cooperating agents across nodes.
+>
+> **v0.1 status**: single-node only. Every concept (node, net, project, session, bus) works on one machine. Multi-node mesh / SSH wiring / web stream are in the TODO list (see `docs/architecture/adr/` and the v0.1 plan).
 
 ## Documentation
 
@@ -14,17 +12,71 @@ TBD — high-level architectural overview goes here.
 - [Architecture Overview](docs/architecture/README.md)
 - [Architecture Decision Records](docs/architecture/adr/)
 
-## Getting Started
+## Verify v0.1 on this device
 
-TBD — setup, install, and run instructions.
+Prerequisites: `tmux ≥ 3.0`, Node ≥ 22. (This repo has been validated on WSL2 + Node 24 + tmux 3.6.)
 
-### After cloning
-
-Enable tracked git hooks (one-time):
+**One-time setup**
 
 ```sh
-git config core.hooksPath .githooks
+cd /root/proj/nagent
+npm install
+npm run build
+chmod +x dist/cli/index.js
+npm link    # registers `nagent` on PATH
 ```
+
+**Terminal 1 — run the daemon**
+
+```sh
+nagent daemon --foreground
+```
+
+**Terminal 2 — exercise the v0.1 surface**
+
+```sh
+nagent init                  # generates identity at ~/.nagent/
+nagent net create demo       # local net of 1
+mkdir -p /tmp/nagent-demo && cd /tmp/nagent-demo
+nagent project init demo-proj
+nagent project list
+nagent new alpha             # creates + attaches; you're in a tmux pane now
+# inside the pane:
+#   nagent register-role agent-alpha
+#   Ctrl-B d  (detach — session persists)
+```
+
+**Headline test — cross-session agent messaging**
+
+```sh
+# create a second session
+nagent new beta --no-attach
+# tag it from outside (because we didn't attach)
+NAGENT_SESSION=beta NAGENT_NODE=$(hostname) nagent register-role agent-beta
+
+# subscribe in one terminal (the "beta agent")
+NAGENT_SESSION=beta NAGENT_NODE=$(hostname) nagent recv --subscribe '*/role:agent-beta'
+
+# in another, send a message addressed by role
+echo '{"q":"status?"}' | NAGENT_SESSION=alpha NAGENT_NODE=$(hostname) \
+  nagent send '*/role:agent-beta'
+# → the subscriber prints: {"verb":"RECV","from":"<host>/alpha","payload":{"q":"status?"},"msgId":"…"}
+```
+
+**Persistence & close**
+
+```sh
+nagent list                  # alpha + beta with attach counts
+# restart the daemon (Ctrl-C terminal 1, then `nagent daemon --foreground` again)
+nagent list                  # still there — tmux kept them alive
+nagent close beta            # destroys beta; tmux session removed
+```
+
+**Notes**
+
+- `~/.nagent/` is the per-user root. Override with `NAGENT_HOME=/path/to/dir` for isolated testing.
+- The dedicated tmux socket is `tmux -L nagent` — your own `tmux ls` and `nagent list` never collide.
+- Deferred verbs (`invite`, `join`, `web`, `project clone`, `install-service`) exit with code 64 and a `deferred to v0.2` notice.
 
 ## Project Structure
 
@@ -35,12 +87,18 @@ nagent/
 ├── README.md              # This file
 ├── .githooks/             # Tracked git hooks (enable via core.hooksPath)
 ├── docs/
-│   ├── PRD.md             # Product requirements
-│   ├── system_design.md   # High-level system design
+│   ├── PRD.md
+│   ├── system_design.md
 │   └── architecture/
-│       ├── README.md      # Architecture overview
-│       └── adr/           # Architecture Decision Records
 ├── scripts/               # Project automation (incl. map generator)
-├── src/                   # Source code (organized by feature/domain)
-└── tests/                 # Tests
+├── src/                   # TypeScript source, organized by domain
+└── tests/                 # vitest unit + integration
+```
+
+### After cloning
+
+Enable tracked git hooks (one-time):
+
+```sh
+git config core.hooksPath .githooks
 ```

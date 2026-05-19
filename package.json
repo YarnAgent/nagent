@@ -1,0 +1,36 @@
+{
+  "name": "nagent",
+  "version": "0.1.0-alpha.1",
+  "description": "Agent net — decentralized mesh CLI for cooperating agents across nodes (v0.1: single-node).",
+  "type": "module",
+  "bin": {
+    "nagent": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CLAUDE.md",
+    "ARCHITECTURE.md"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli/index.ts",
+    "dev:daemon": "tsx src/cli/index.ts daemon --foreground",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepare": "tsc"
+  },
+  "dependencies": {
+    "commander": "^14.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
