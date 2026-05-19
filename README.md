@@ -17,12 +17,21 @@ TBD — high-level architectural overview goes here.
 
 TBD — setup, install, and run instructions.
 
+### After cloning
+
+Enable tracked git hooks (one-time):
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## Project Structure
 
 ```
 nagent/
 ├── CLAUDE.md              # Durable conventions for Claude sessions
 ├── README.md              # This file
+├── .githooks/             # Tracked git hooks (enable via core.hooksPath)
 ├── docs/
 │   ├── PRD.md             # Product requirements
 │   ├── system_design.md   # High-level system design

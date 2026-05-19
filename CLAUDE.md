@@ -22,6 +22,16 @@ Durable conventions and project-specific guidance for Claude sessions in this re
 - TDD: write the failing test first, then implement, then refactor.
 - After writing code: run **code-reviewer** (and **security-reviewer** for sensitive code).
 
+## Git Hooks
+
+Tracked hooks live in `.githooks/`. After cloning, run once:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+- `post-commit`: auto-pushes `main` to `origin/main`. Skips on any other branch. Never force-pushes.
+
 ## Open Questions
 
 - Language / runtime: TBD

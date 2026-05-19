@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Auto-push commits on main to origin.
+# Per user instruction (2026-05-19): every commit on main should auto-push.
+# Safety: only pushes when on main; never force-pushes; failures here do not
+# abort the commit (post-commit hooks cannot).
+
+set -u
+
+branch=$(git symbolic-ref --short HEAD 2>/dev/null || true)
+if [ "$branch" = "main" ]; then
+  echo "post-commit: pushing main -> origin/main..."
+  git push origin main
+else
+  echo "post-commit: on '$branch' (not main), skipping auto-push."
+fi
