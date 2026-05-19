@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Regenerate ARCHITECTURE.md and stage it so each commit ships with a
+# current path -> purpose map for agents to consume.
+set -e
+
+ROOT=$(git rev-parse --show-toplevel)
+"$ROOT/scripts/build-arch-map.sh"
+git add "$ROOT/ARCHITECTURE.md"

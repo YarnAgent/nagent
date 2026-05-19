@@ -1,3 +1,7 @@
+---
+purpose: Architecture overview and decision records (ADRs).
+---
+
 # Architecture
 
 This directory holds architectural documentation for nagent.
