@@ -21,8 +21,11 @@ export async function fanoutSessionsAcrossNet(input) {
         remoteArgs.push("--project", input.projectFilter);
     if (input.includeAll)
         remoteArgs.push("--all");
+    // Per-peer timeout: 8s accommodates a cold zsh -ilc on macOS (nvm + asdf
+    // sourcing can easily eat 1-2s) plus Tailscale RTT plus SSH handshake.
+    // The ADR said 3s; real-world testing showed that's too tight in practice.
     const results = await runWithConcurrency(others, 16, async (peer) => {
-        return sshListLocal(`nagent.${peer.nodeName}`, remoteArgs, 3000);
+        return sshListLocal(`nagent.${peer.nodeName}`, remoteArgs, 8000);
     });
     for (let i = 0; i < others.length; i++) {
         const peer = others[i];
