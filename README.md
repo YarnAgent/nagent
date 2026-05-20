@@ -37,8 +37,17 @@ nagent                       # auto-bootstrap: identity → default net → daem
                              #   alpha                  ← name when prompted
                              # You're attached to a tmux pane. Inside:
                              #   nagent register-role agent-alpha
-                             #   Ctrl-B d               (detach — session persists)
+                             #   Ctrl-Q to detach (session persists)
+                             #   `exit` or `nagent close` to destroy
 ```
+
+### Leaving a session
+
+| Goal | How |
+|---|---|
+| Detach (session keeps running) | **`Ctrl-Q`** (single keypress, no prefix) — or the standard `Ctrl-B` then `d` |
+| Destroy the session | `exit` / Ctrl-D in the only pane, or `nagent close` from inside |
+| Quit the picker REPL | `q` at the `>` prompt (or empty enter / Ctrl-C — none of which destroy anything) |
 
 **Top-level CLI is sessions-only**
 

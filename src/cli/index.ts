@@ -128,6 +128,9 @@ async function cmdNew(name: string, opts: { project?: string | false; attach?: b
     return (created as SessionCreatedFrame).session;
   });
   process.stdout.write(`created session "${meta.name}" (${meta.sessionId})${projectId ? ` in project ${projectId}` : ""}\n`);
+  if (opts.attach !== false) {
+    process.stdout.write(`detach: Ctrl-Q (or Ctrl-B d)   destroy: \`exit\` or \`nagent close\`\n`);
+  }
   createOrAttachTmuxSession({
     sessionId: meta.sessionId,
     sessionDisplayName: meta.name,

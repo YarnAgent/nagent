@@ -50,9 +50,19 @@ export function createOrAttachTmuxSession(opts: SpawnSessionOptions): void {
     }
   }
 
+  // Apply nagent's keybindings (server-wide on the dedicated tmux socket;
+  // idempotent — safe to run on every create/attach). Adds Ctrl-Q as a one-key
+  // detach (no prefix needed). The standard Ctrl-B d still works.
+  applyNagentKeybinds();
+
   if (opts.attach) {
     attachTmuxSession(target);
   }
+}
+
+/** Idempotent: install nagent's tmux keybindings on the nagent socket's server. */
+export function applyNagentKeybinds(): void {
+  spawnSync("tmux", tmuxArgs(["bind-key", "-n", "C-q", "detach-client"]), { stdio: "ignore" });
 }
 
 /** Replaces the current process with `tmux -L nagent attach -t <target>`. */
