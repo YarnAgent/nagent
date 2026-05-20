@@ -1,5 +1,6 @@
 import { sign as edSign, verify as edVerify, randomBytes, type KeyObject, generateKeyPairSync } from "node:crypto";
 import { publicKeyFromRaw, privateKeyFromRaw } from "../ssh/identity.js";
+import { canonicalJson } from "../lib/canonical.js";
 
 export const INVITE_VERSION = 1;
 
@@ -102,23 +103,3 @@ export function oneTimePrivKey(token: InviteToken): KeyObject {
   return privateKeyFromRaw(priv, pub);
 }
 
-/** Compute a deterministic byte string for signature purposes. */
-function canonicalJson(obj: unknown): string {
-  // We use the JSON.stringify deterministic property as long as keys are
-  // serialized in insertion order. For our payload objects we control creation
-  // order in encodeToken; for verify-side we reconstruct in the same order.
-  // To make this robust against future field reordering, sort keys.
-  return JSON.stringify(sortKeys(obj));
-}
-
-function sortKeys(x: unknown): unknown {
-  if (Array.isArray(x)) return x.map(sortKeys);
-  if (x && typeof x === "object") {
-    const out: Record<string, unknown> = {};
-    for (const k of Object.keys(x as Record<string, unknown>).sort()) {
-      out[k] = sortKeys((x as Record<string, unknown>)[k]);
-    }
-    return out;
-  }
-  return x;
-}

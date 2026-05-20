@@ -23,6 +23,12 @@ import {
 } from "../ssh/ssh_config.js";
 import { currentReachableAddresses } from "../ssh/addresses.js";
 import {
+  buildGossipAdd,
+  runWithConcurrency,
+  sendGossipAdd,
+  signGossipAdd,
+} from "../gossip/index.js";
+import {
   readActiveState,
   readIdentity,
   readInvites,
@@ -277,7 +283,55 @@ export async function cmdJoinRespond(inviteId: string): Promise<void> {
     issuerSshUser: userInfo().username,
     issuerAddrs,
   };
+
+  // v0.3: wire the joiner into the issuer's own ssh_config so the issuer can
+  // SSH out to the joiner (for future gossip fanouts and `attach`). Also wire
+  // any existing peers we haven't entered before (heal forward).
+  await ensureUserSshConfigInclude();
+  for (const p of finalPeers) {
+    if (p.nodeName === identity.nodeName) continue;
+    await wireHostEntryForPeer(p);
+  }
+
+  // v0.3: fan out gossip-add-peer to existing peers (excluding issuer and
+  // joiner) so any-to-any mesh trust is established. Bounded concurrency,
+  // best-effort — failures are captured for a future heal pass, not surfaced
+  // to the joiner. Errors during fanout MUST NOT block the JOIN_ACCEPTED.
+  const targets = finalPeers.filter(
+    (p) => p.nodeName !== identity.nodeName && p.nodeName !== redeem.joinerNode,
+  );
+  if (targets.length > 0) {
+    const payload = buildGossipAdd({
+      netId: netMeta.netId,
+      callerPub: keypair.rawPub.toString("base64url"),
+      callerNode: identity.nodeName,
+      newPeer: joinerPeer,
+    });
+    const signed = signGossipAdd(payload, keypair.rawPriv, keypair.rawPub);
+    await runWithConcurrency(targets, 8, async (p) => {
+      try {
+        await sendGossipAdd(`nagent.${p.nodeName}`, signed, { timeoutMs: 8000 });
+      } catch {
+        // Best-effort: a heal pass on next daemon start will retry. The
+        // join itself succeeded regardless.
+      }
+    });
+  }
+
   process.stdout.write(JSON.stringify(accepted) + "\n");
+}
+
+async function wireHostEntryForPeer(p: Peer): Promise<void> {
+  const first = p.addresses[0];
+  if (!first) return;
+  const [host, portStr] = splitHostPort(first);
+  await writeHostEntry({
+    peerName: p.nodeName,
+    host,
+    ...(portStr ? { port: Number.parseInt(portStr, 10) } : {}),
+    user: p.sshUser ?? userInfo().username,
+    identityFile: paths().sshKey,
+  });
 }
 
 async function rejectAndExit(message: string): Promise<void> {

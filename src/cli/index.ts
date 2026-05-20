@@ -30,6 +30,7 @@ import type {
 import { runPicker } from "./picker.js";
 import { bootstrap } from "./bootstrap.js";
 import { cmdJoin, cmdJoinRespond } from "./join.js";
+import { cmdGossipAddPeer } from "./gossip.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -447,6 +448,18 @@ async function main(): Promise<void> {
     });
   // commander v14 doesn't expose `hidden` in chained form; flip the flag directly.
   (joinRespondCmd as unknown as { _hidden: boolean })._hidden = true;
+
+  // Internal — receives signed gossip-add-peer payloads on stdin from any
+  // already-trusted peer (used by the issuer's post-redeem fanout and by
+  // daemon-startup heal passes). Pure file mutation; never spawns a daemon.
+  const gossipCmd = program
+    .command("gossip-add-peer")
+    .description("(internal) handle an inbound mesh-trust gossip from stdin")
+    .action(async () => {
+      process.env.NAGENT_NO_BOOTSTRAP = "1";
+      await cmdGossipAddPeer();
+    });
+  (gossipCmd as unknown as { _hidden: boolean })._hidden = true;
 
   try {
     await program.parseAsync(process.argv);
