@@ -12,8 +12,10 @@ venv/
 __pycache__/
 *.egg-info/
 target/
-dist/
 build/
+# Note: dist/ is intentionally NOT ignored — npm-from-github installs need
+# the compiled output without running tsc at install time (devDeps aren't
+# reliably on PATH during npm's git-dep `prepare` step).
 
 # Logs & caches
 *.log

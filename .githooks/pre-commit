@@ -1,8 +1,22 @@
 #!/usr/bin/env bash
-# Regenerate ARCHITECTURE.md and stage it so each commit ships with a
-# current path -> purpose map for agents to consume.
+# Pre-commit:
+#   1. Regenerate ARCHITECTURE.md from per-directory purpose: frontmatter.
+#   2. Rebuild dist/ so the npm-from-github install path stays current
+#      (we ship dist/ in the repo because npm's git-dep `prepare` step doesn't
+#      reliably resolve devDeps like `tsc`).
+# Both outputs are staged into the commit.
 set -e
 
 ROOT=$(git rev-parse --show-toplevel)
+
 "$ROOT/scripts/build-arch-map.sh"
 git add "$ROOT/ARCHITECTURE.md"
+
+# Rebuild dist/ only when source or tsconfig changed.
+SRC_CHANGED=$(git diff --cached --name-only -- 'src/**' 'tsconfig.json' package.json 2>/dev/null | head -1)
+if [ -n "$SRC_CHANGED" ]; then
+  echo "pre-commit: rebuilding dist/ (source changed)..."
+  (cd "$ROOT" && npm run build --silent)
+  chmod +x "$ROOT/dist/cli/index.js" 2>/dev/null || true
+  git add "$ROOT/dist"
+fi
