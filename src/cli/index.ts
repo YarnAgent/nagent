@@ -31,6 +31,8 @@ import { runPicker } from "./picker.js";
 import { bootstrap } from "./bootstrap.js";
 import { cmdJoin, cmdJoinRespond } from "./join.js";
 import { cmdGossipAddPeer } from "./gossip.js";
+import { attachLine, attachMosh } from "./attach_modes.js";
+import { cmdAttachLineServer } from "./attach_line_server.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -142,17 +144,26 @@ async function cmdNew(name: string, opts: { project?: string | false; attach?: b
   });
 }
 
-async function cmdAttach(name: string): Promise<void> {
+interface AttachOpts {
+  line?: boolean;
+  mosh?: boolean;
+}
+
+async function cmdAttach(name: string, opts: AttachOpts): Promise<void> {
   // Cross-node form: `nagent attach <peer>/<session>` → SSH-exec the remote nagent.
   const slash = name.indexOf("/");
   if (slash > 0) {
     const peer = name.slice(0, slash);
     const sess = name.slice(slash + 1);
     if (!peer || !sess) throw new Error(`attach target needs both peer and session: ${name}`);
-    await attachRemote(peer, sess);
+    if (opts.line && opts.mosh) throw new Error("--line and --mosh are mutually exclusive");
+    await attachRemote(peer, sess, opts);
     return;
   }
 
+  if (opts.line || opts.mosh) {
+    throw new Error("--line / --mosh require a `<peer>/<session>` target");
+  }
   const ctx = await loadContext();
   const entry = await withDaemon(async (client) => {
     await sendHelloAsCli(client, ctx);
@@ -165,25 +176,31 @@ async function cmdAttach(name: string): Promise<void> {
   attachTmuxSession(tmuxSessionName(entry.sessionId));
 }
 
-async function attachRemote(peer: string, sess: string): Promise<void> {
+async function attachRemote(peer: string, sess: string, opts: AttachOpts): Promise<void> {
   const ctx = await loadContext();
   if (!ctx.activeNetId) throw new Error("no active net");
   const peers = (await import("../store/index.js")).readPeers;
   const list = await peers(ctx.activeNetId);
   const target = list.find((p) => p.nodeName === peer);
   if (!target) throw new Error(`unknown peer: ${peer} (peers: ${list.map((p) => p.nodeName).join(", ")})`);
-  // The ssh_config entry `Host nagent.<peer>` is the source of truth for host/user/identity.
-  // SSH joins all post-host args with spaces into a single command string the
-  // remote login shell re-parses, so we do our own quoting. We invoke through
-  // `bash -ilc` (interactive + login) because most nvm/mise/volta setups guard
-  // their bashrc with `[ -z "$PS1" ] && return` — only an interactive shell will
-  // actually source the version-manager and put `nagent` on PATH.
+  const sshHost = `nagent.${peer}`;
+
+  if (opts.mosh) {
+    await attachMosh(sshHost, sess);
+    return; // attachMosh execs / exits
+  }
+  if (opts.line) {
+    await attachLine(sshHost, sess);
+    return; // attachLine never resolves; exits on remote exit
+  }
+
+  // Default mode (v0.2 behavior): ssh -t with PTY, remote runs `nagent attach`.
   const innerCmd = `nagent attach ${shellSingleQuote(sess)}`;
   const remoteCmd = `bash -ilc ${shellSingleQuote(innerCmd)}`;
   const { spawnSync } = await import("node:child_process");
   const r = spawnSync(
     "ssh",
-    ["-t", `nagent.${peer}`, "--", remoteCmd],
+    ["-t", sshHost, "--", remoteCmd],
     { stdio: "inherit" },
   );
   process.exit(r.status ?? 0);
@@ -470,8 +487,18 @@ async function main(): Promise<void> {
 
   program
     .command("attach <name>")
-    .description("attach to an existing session")
-    .action(bootstrapped(async (name: string) => { await cmdAttach(name); }));
+    .description("attach to an existing session (local NAME or <peer>/<session>)")
+    .option("--line", "[v0.3] line-buffered shell — no per-keystroke RTT, no TUI support")
+    .option("--mosh", "[v0.3] use mosh transport — predictive local echo (requires mosh on both ends)")
+    .action(bootstrapped(async (name: string, opts: AttachOpts) => { await cmdAttach(name, opts); }));
+
+  // Internal — server side of `attach … --line`. Reads command lines from
+  // stdin and forwards them to tmux send-keys; streams pane output to stdout.
+  const attachLineCmd = program
+    .command("attach-line <session>")
+    .description("(internal) line-buffered attach server: stdin → tmux send-keys, pane → stdout")
+    .action(bootstrapped(async (session: string) => { await cmdAttachLineServer(session); }));
+  (attachLineCmd as unknown as { _hidden: boolean })._hidden = true;
 
   const listCmd = program
     .command("list")
