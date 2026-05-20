@@ -54,13 +54,57 @@ fi
 info "installing nagent from ${REPO} ..."
 npm install -g "${REPO}"
 
-NAGENT_BIN="$(command -v nagent || true)"
+# Locate the installed binary. `command -v` only sees PATH; we also probe
+# `npm config get prefix` directly so we can report a helpful message when
+# the install succeeded but the prefix isn't on the caller's shell PATH
+# (common in curl-piped installs on a fresh nvm setup).
+NPM_PREFIX="$(npm config get prefix 2>/dev/null || true)"
+NAGENT_BIN=""
+if command -v nagent >/dev/null 2>&1; then
+  NAGENT_BIN="$(command -v nagent)"
+elif [ -n "${NPM_PREFIX}" ] && [ -x "${NPM_PREFIX}/bin/nagent" ]; then
+  NAGENT_BIN="${NPM_PREFIX}/bin/nagent"
+fi
+
 if [ -z "${NAGENT_BIN}" ]; then
-  die "install completed but \`nagent\` is not on PATH. Check your npm global bin (\`npm config get prefix\`/bin)."
+  die "install completed but the bin can't be located.
+
+  npm config get prefix → ${NPM_PREFIX:-<empty>}
+  Expected at:           ${NPM_PREFIX}/bin/nagent (not present or not executable)
+
+  Try \`npm root -g\` to confirm where node_modules landed."
 fi
 
 ok "installed: ${NAGENT_BIN}"
 ok "version: $(${NAGENT_BIN} --version)"
+
+# Detect a likely-missing PATH entry and print actionable hints.
+case ":${PATH}:" in
+  *":${NPM_PREFIX}/bin:"*)
+    PATH_OK=1
+    ;;
+  *)
+    PATH_OK=0
+    ;;
+esac
+
+if [ "${PATH_OK}" = "0" ]; then
+  PROFILE_HINT="~/.zshrc (zsh) or ~/.bashrc (bash)"
+  cat <<EOF
+
+${BLUE}Note:${RESET} ${NPM_PREFIX}/bin is not on your shell PATH right now.
+You can either:
+
+  • Run nagent by full path:
+       ${NAGENT_BIN} --version
+
+  • Open a NEW terminal window — npm-via-nvm usually fixes itself there.
+
+  • Add this line to ${PROFILE_HINT} and restart your shell:
+       export PATH="${NPM_PREFIX}/bin:\$PATH"
+
+EOF
+fi
 
 cat <<'EOF'
 
