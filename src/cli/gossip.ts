@@ -5,9 +5,9 @@ import {
   type GossipReject,
   type SignedGossipAdd,
 } from "../gossip/index.js";
+import { isReplay } from "../gossip/replay_cache.js";
 import {
   appendAuthorizedKey,
-  hasAuthorizedKeyTag,
 } from "../ssh/authorized_keys.js";
 import {
   sshAuthorizedKeysLine,
@@ -23,8 +23,11 @@ import {
   readPeers,
   writePeers,
 } from "../store/index.js";
+import { readJson } from "../store/json.js";
 import { paths } from "../platform/paths.js";
 import type { Peer } from "../types/index.js";
+
+const NODE_NAME_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
 /**
  * Apply a verified-or-not gossip-add to local state. Returns an ack or reject
@@ -40,6 +43,13 @@ export async function applyGossipAdd(
 ): Promise<GossipAck | GossipReject> {
   const verified = verifyGossipAdd(signed, now);
   if (!verified.ok) return { v: 1, ok: false, error: `signature: ${verified.error}` };
+
+  // Replay guard: if we've already applied this exact signed payload in the
+  // freshness window, refuse it so an attacker can't replay it to undo a
+  // legitimate rotation that landed in between. Issue #3, M1.
+  if (await isReplay(signed, now.getTime())) {
+    return { v: 1, ok: false, error: "replay: payload already applied within freshness window" };
+  }
 
   const identity = await readIdentity();
   if (!identity) return { v: 1, ok: false, error: "receiver not initialized" };
@@ -61,6 +71,15 @@ export async function applyGossipAdd(
   if (!newPeer.nodeName || !newPeer.pubKey) {
     return { v: 1, ok: false, error: "newPeer is missing required fields" };
   }
+  // Validate nodeName before any further use — it flows into authorized_keys
+  // tags and ssh_config Host aliases, where exotic characters would create
+  // ambiguity (see issue #3, M2).
+  if (!NODE_NAME_PATTERN.test(newPeer.nodeName)) {
+    return { v: 1, ok: false, error: `newPeer.nodeName must match ${NODE_NAME_PATTERN.source}` };
+  }
+  if (newPeer.sshUser && !/^[A-Za-z_][A-Za-z0-9_-]{0,31}$/.test(newPeer.sshUser)) {
+    return { v: 1, ok: false, error: "newPeer.sshUser is not a valid POSIX username" };
+  }
   if (newPeer.nodeName === identity.nodeName) {
     return { v: 1, ok: true, changed: false, echoedNodeName: identity.nodeName };
   }
@@ -71,16 +90,41 @@ export async function applyGossipAdd(
   }
 
   const tag = `peer-${newPeer.nodeName}`;
-  const alreadyAuthorized = await hasAuthorizedKeyTag(tag);
   const existingIdx = peers.findIndex((p) => p.nodeName === newPeer.nodeName);
-  if (alreadyAuthorized && existingIdx >= 0 && peers[existingIdx]!.pubKey === newPeer.pubKey) {
+
+  // Rotation gate (issue #3, C1 + H2): if we already know this nodeName under
+  // a different pubKey, only allow the rotation if the gossip was signed by
+  //   (a) the current-on-record pubKey for that nodeName (self-rotation), OR
+  //   (b) the net's origin pubKey (admin-style override from authority.json).
+  // Without this, any peer could overwrite any other peer's identity entry
+  // and then sign further gossip as the impersonated peer.
+  if (existingIdx >= 0 && peers[existingIdx]!.pubKey !== newPeer.pubKey) {
+    const origin = (await readJson<{ originPubKey: string }>(paths().netAuthority(active.activeNetId)))?.originPubKey;
+    const isSelfRotation = signed.callerPub === peers[existingIdx]!.pubKey;
+    const isOriginRotation = origin !== undefined && signed.callerPub === origin;
+    if (!isSelfRotation && !isOriginRotation) {
+      return {
+        v: 1, ok: false,
+        error: `refusing to rotate peer "${newPeer.nodeName}": gossip must be signed by current pubKey or net origin`,
+      };
+    }
+  }
+
+  // Idempotency short-circuit: matching pubKey AND matching authorized_keys
+  // line means there's nothing to do.
+  if (existingIdx >= 0 && peers[existingIdx]!.pubKey === newPeer.pubKey) {
+    // Still ensure the authorized_keys entry exists (heals state-drift where
+    // peers.json got ahead of authorized_keys).
+    const line = sshAuthorizedKeysLine(newPubRaw, `nagent-peer-${newPeer.nodeName}`);
+    await appendAuthorizedKey({ line, tag });
     return { v: 1, ok: true, changed: false, echoedNodeName: identity.nodeName };
   }
 
-  if (!alreadyAuthorized) {
-    const line = sshAuthorizedKeysLine(newPubRaw, `nagent-peer-${newPeer.nodeName}`);
-    await appendAuthorizedKey({ line, tag });
-  }
+  // Always (re-)write the authorized_keys entry so peers.json and
+  // authorized_keys stay consistent across rotations. appendAuthorizedKey is
+  // idempotent by tag — it replaces any existing tagged line. Issue #3, H2.
+  const line = sshAuthorizedKeysLine(newPubRaw, `nagent-peer-${newPeer.nodeName}`);
+  await appendAuthorizedKey({ line, tag });
 
   const peerRecord: Peer = {
     nodeName: newPeer.nodeName,

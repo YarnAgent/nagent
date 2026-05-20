@@ -293,10 +293,20 @@ export async function cmdJoinRespond(inviteId: string): Promise<void> {
     await wireHostEntryForPeer(p);
   }
 
+  // Flush JOIN_ACCEPTED to the joiner BEFORE the gossip fanout runs. If we
+  // ran fanout first, a single slow peer would delay (or worst-case lose) the
+  // joiner's response — the joiner could time out the ssh while the issuer
+  // had already committed `state: "redeemed"`, leaving the joiner unable to
+  // retry. See issue #3 (H1). Write with a flush callback, then kick off the
+  // fanout off the main path with a hard wall-clock budget.
+  await new Promise<void>((resolve) => {
+    process.stdout.write(JSON.stringify(accepted) + "\n", () => resolve());
+  });
+
   // v0.3: fan out gossip-add-peer to existing peers (excluding issuer and
-  // joiner) so any-to-any mesh trust is established. Bounded concurrency,
-  // best-effort — failures are captured for a future heal pass, not surfaced
-  // to the joiner. Errors during fanout MUST NOT block the JOIN_ACCEPTED.
+  // joiner) so any-to-any mesh trust is established. Best-effort — failures
+  // are captured for a future heal pass, not surfaced to the joiner. We cap
+  // total wall-clock at 12 s so a constrained-ssh session can't dangle.
   const targets = finalPeers.filter(
     (p) => p.nodeName !== identity.nodeName && p.nodeName !== redeem.joinerNode,
   );
@@ -308,17 +318,19 @@ export async function cmdJoinRespond(inviteId: string): Promise<void> {
       newPeer: joinerPeer,
     });
     const signed = signGossipAdd(payload, keypair.rawPriv, keypair.rawPub);
-    await runWithConcurrency(targets, 8, async (p) => {
+    const fanout = runWithConcurrency(targets, 8, async (p) => {
       try {
-        await sendGossipAdd(`nagent.${p.nodeName}`, signed, { timeoutMs: 8000 });
+        await sendGossipAdd(`nagent.${p.nodeName}`, signed, { timeoutMs: 6000 });
       } catch {
         // Best-effort: a heal pass on next daemon start will retry. The
         // join itself succeeded regardless.
       }
     });
+    await Promise.race([
+      fanout,
+      new Promise<void>((resolve) => setTimeout(resolve, 12000)),
+    ]);
   }
-
-  process.stdout.write(JSON.stringify(accepted) + "\n");
 }
 
 async function wireHostEntryForPeer(p: Peer): Promise<void> {

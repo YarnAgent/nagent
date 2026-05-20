@@ -189,6 +189,173 @@ describe("applyGossipAdd (receiver-side gossip handler)", () => {
     expect(await hasAuthorizedKeyTag("peer-receiver")).toBe(false);
   });
 
+  it("refuses peer impersonation: foreign signer cannot rotate an existing peer's pubkey", async () => {
+    // Setup: issuer (signer #1) and an existing alice peer with pubkey A1.
+    // Then eve (signer #2, also a trusted peer) tries to overwrite alice
+    // with eve's chosen new key. This was issue #3 C1 (peer impersonation).
+    const issuer = halves();
+    const eve = halves();
+    const aliceOld = halves();
+    const attacker = halves(); // Eve's chosen replacement for alice
+    await writePeers(netId, [
+      peer("issuer", issuer.pubB64u),
+      peer("eve", eve.pubB64u),
+      peer("alice", aliceOld.pubB64u),
+    ]);
+    // authority.json sets issuer as the net origin; eve is NOT origin.
+    const { writeJson } = await import("../../src/store/json.js");
+    const { paths } = await import("../../src/platform/paths.js");
+    await writeJson(paths().netAuthority(netId), { originPubKey: issuer.pubB64u, delegations: [] });
+
+    const payload = buildGossipAdd({
+      netId,
+      callerPub: eve.pubB64u,
+      callerNode: "eve",
+      newPeer: peer("alice", attacker.pubB64u), // hijack attempt
+    });
+    const signed = signGossipAdd(payload, eve.rawPriv, eve.rawPub);
+
+    const result = await applyGossipAdd(signed);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/rotate/i);
+
+    // Alice's stored pubkey must still be A1, not the attacker's key.
+    const peers = await readPeers(netId);
+    expect(peers.find((p) => p.nodeName === "alice")?.pubKey).toBe(aliceOld.pubB64u);
+  });
+
+  it("allows self-rotation: an existing peer can replace their own pubkey", async () => {
+    const issuer = halves();
+    const aliceOld = halves();
+    const aliceNew = halves();
+    await writePeers(netId, [
+      peer("issuer", issuer.pubB64u),
+      peer("alice", aliceOld.pubB64u),
+    ]);
+
+    const payload = buildGossipAdd({
+      netId,
+      callerPub: aliceOld.pubB64u, // signed by alice's CURRENT key
+      callerNode: "alice",
+      newPeer: peer("alice", aliceNew.pubB64u),
+    });
+    const signed = signGossipAdd(payload, aliceOld.rawPriv, aliceOld.rawPub);
+
+    const result = await applyGossipAdd(signed);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.changed).toBe(true);
+
+    const peers = await readPeers(netId);
+    expect(peers.find((p) => p.nodeName === "alice")?.pubKey).toBe(aliceNew.pubB64u);
+  });
+
+  it("allows origin-signed rotation (admin override)", async () => {
+    const origin = halves();
+    const aliceOld = halves();
+    const aliceNew = halves();
+    await writePeers(netId, [
+      peer("origin", origin.pubB64u),
+      peer("alice", aliceOld.pubB64u),
+    ]);
+    const { writeJson } = await import("../../src/store/json.js");
+    const { paths } = await import("../../src/platform/paths.js");
+    await writeJson(paths().netAuthority(netId), { originPubKey: origin.pubB64u, delegations: [] });
+
+    const payload = buildGossipAdd({
+      netId,
+      callerPub: origin.pubB64u,
+      callerNode: "origin",
+      newPeer: peer("alice", aliceNew.pubB64u),
+    });
+    const signed = signGossipAdd(payload, origin.rawPriv, origin.rawPub);
+
+    const result = await applyGossipAdd(signed);
+    expect(result.ok).toBe(true);
+
+    const peers = await readPeers(netId);
+    expect(peers.find((p) => p.nodeName === "alice")?.pubKey).toBe(aliceNew.pubB64u);
+  });
+
+  it("rotation also updates authorized_keys (fixes H2 desync)", async () => {
+    const aliceOld = halves();
+    const aliceNew = halves();
+    await writePeers(netId, [peer("alice", aliceOld.pubB64u)]);
+
+    // Initial add via aliceOld signing for herself (no rotation case yet).
+    const initial = buildGossipAdd({
+      netId,
+      callerPub: aliceOld.pubB64u,
+      callerNode: "alice",
+      newPeer: peer("alice", aliceOld.pubB64u),
+    });
+    await applyGossipAdd(signGossipAdd(initial, aliceOld.rawPriv, aliceOld.rawPub));
+    expect(await hasAuthorizedKeyTag("peer-alice")).toBe(true);
+
+    // Self-rotation to the new key.
+    const rotate = buildGossipAdd({
+      netId,
+      callerPub: aliceOld.pubB64u,
+      callerNode: "alice",
+      newPeer: peer("alice", aliceNew.pubB64u),
+    });
+    await applyGossipAdd(signGossipAdd(rotate, aliceOld.rawPriv, aliceOld.rawPub));
+
+    // authorized_keys MUST reflect the new key, not the old one. The line
+    // format is `ssh-ed25519 <base64-blob> <comment>` where blob = uint32(11)
+    // "ssh-ed25519" uint32(32) <raw32-pubkey>. We rebuild what each version
+    // would look like and assert exactly one peer-alice line, matching the
+    // new key.
+    const { sshAuthorizedKeysLine } = await import("../../src/ssh/identity.js");
+    const oldLine = sshAuthorizedKeysLine(aliceOld.rawPub, "nagent-peer-alice");
+    const newLine = sshAuthorizedKeysLine(aliceNew.rawPub, "nagent-peer-alice");
+    const { readFile } = await import("node:fs/promises");
+    const aks = await readFile(process.env.NAGENT_AUTHORIZED_KEYS_PATH!, "utf8");
+    const peerLines = aks.split("\n").filter((l) => l.includes("nagent-peer-alice"));
+    expect(peerLines.length).toBe(1);
+    expect(peerLines[0]).toContain(newLine.split(" ")[1]); // the base64 blob
+    expect(peerLines[0]).not.toContain(oldLine.split(" ")[1]);
+  });
+
+  it("rejects exact-payload replay within the freshness window (M1)", async () => {
+    const issuer = halves();
+    const newGuy = halves();
+    await writePeers(netId, [peer("issuer", issuer.pubB64u)]);
+
+    const payload = buildGossipAdd({
+      netId,
+      callerPub: issuer.pubB64u,
+      callerNode: "issuer",
+      newPeer: peer("bob", newGuy.pubB64u),
+    });
+    const signed = signGossipAdd(payload, issuer.rawPriv, issuer.rawPub);
+
+    const first = await applyGossipAdd(signed);
+    expect(first.ok).toBe(true);
+
+    // Identical payload (same bytes, same sig) replayed within the window.
+    const second = await applyGossipAdd(signed);
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.error).toMatch(/replay/i);
+  });
+
+  it("rejects newPeer.nodeName with disallowed characters (M2)", async () => {
+    const issuer = halves();
+    const newGuy = halves();
+    await writePeers(netId, [peer("issuer", issuer.pubB64u)]);
+
+    const payload = buildGossipAdd({
+      netId,
+      callerPub: issuer.pubB64u,
+      callerNode: "issuer",
+      newPeer: peer("bob; rm -rf /", newGuy.pubB64u),
+    });
+    const signed = signGossipAdd(payload, issuer.rawPriv, issuer.rawPub);
+
+    const result = await applyGossipAdd(signed);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/nodeName/i);
+  });
+
   it("rejects gossip for a different netId", async () => {
     const issuer = halves();
     const newGuy = halves();

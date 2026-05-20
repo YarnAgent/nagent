@@ -1,11 +1,10 @@
 import { promises as fs } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { createReadStream } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import { tmuxSessionName } from "../session/index.js";
+import { paths } from "../platform/paths.js";
 import { readActiveState } from "../store/index.js";
 import { BusClient } from "../bus/client.js";
 const TMUX = "tmux";
@@ -30,11 +29,19 @@ export async function cmdAttachLineServer(sessionName) {
         process.stderr.write(`nagent attach-line: tmux session ${target} not found\n`);
         process.exit(1);
     }
-    // Per-invocation fifo for pipe-pane output. /tmp because it's the most
-    // portable writable place; the path includes a random suffix to avoid
-    // collisions with concurrent attach-line callers.
-    const fifoPath = join(tmpdir(), `nagent-pipe-${sessionId}-${randomBytes(4).toString("hex")}`);
-    spawnSync("mkfifo", [fifoPath]);
+    // Per-invocation fifo for pipe-pane output. We put it under
+    // `~/.nagent/run/<pid>/` (owned 0700) so other local users can't read the
+    // live pane stream and so the daemon's startup orphan-reaper can
+    // garbage-collect leaked dirs by pid. Fifo itself is 0600. Issue #3, H4.
+    const runDir = join(paths().root, "run", `attach-${process.pid}`);
+    await fs.mkdir(runDir, { recursive: true, mode: 0o700 });
+    await fs.chmod(runDir, 0o700);
+    const fifoPath = join(runDir, "pane.fifo");
+    const mk = spawnSync("mkfifo", ["-m", "600", fifoPath]);
+    if (mk.status !== 0) {
+        process.stderr.write(`nagent attach-line: mkfifo failed: ${mk.stderr.toString()}\n`);
+        process.exit(1);
+    }
     // Install pipe-pane: tmux writes the pane's terminal output to the fifo as
     // it appears. The `-o` flag toggles, and we pass a fresh command, so any
     // prior pipe-pane on this pane is replaced. We exit() the shell so the cat
@@ -59,13 +66,32 @@ export async function cmdAttachLineServer(sessionName) {
         spawn(TMUX, ["-L", TMUX_SOCKET, "send-keys", "-t", target, "-l", line], { stdio: "ignore" });
         spawn(TMUX, ["-L", TMUX_SOCKET, "send-keys", "-t", target, "Enter"], { stdio: "ignore" });
     });
+    let cleanedUp = false;
     const cleanup = () => {
+        if (cleanedUp)
+            return;
+        cleanedUp = true;
         spawnSync(TMUX, ["-L", TMUX_SOCKET, "pipe-pane", "-t", target], { stdio: "ignore" });
-        void fs.unlink(fifoPath).catch(() => undefined);
+        // Best-effort: rm the per-pid run dir. Daemon-startup orphan reaper
+        // (deferred to v0.3.x) will pick up anything we miss.
+        try {
+            void fs.rm(runDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+        catch { /* ignore */ }
     };
+    // Issue #3, H3: register cleanup on every reasonable exit path. SIGKILL is
+    // unrecoverable on our side — the daemon orphan-reaper covers that case.
+    process.on("exit", cleanup);
     rl.on("close", () => { cleanup(); process.exit(0); });
-    process.on("SIGTERM", () => { cleanup(); process.exit(0); });
-    process.on("SIGHUP", () => { cleanup(); process.exit(0); });
+    process.on("SIGINT", () => { cleanup(); process.exit(130); });
+    process.on("SIGTERM", () => { cleanup(); process.exit(143); });
+    process.on("SIGHUP", () => { cleanup(); process.exit(129); });
+    process.on("SIGPIPE", () => { cleanup(); process.exit(141); });
+    process.on("uncaughtException", (err) => {
+        process.stderr.write(`nagent attach-line: ${err.message}\n`);
+        cleanup();
+        process.exit(1);
+    });
 }
 /**
  * Resolve a session NAME to its sessionId via the local nagent daemon. We
