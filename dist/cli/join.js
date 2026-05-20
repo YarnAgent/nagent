@@ -3,9 +3,9 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
-import { assertNotExpired, decodeAndVerify, oneTimePrivKey, } from "../invite/index.js";
+import { assertNotExpired, decodeAndVerify, } from "../invite/index.js";
 import { appendAuthorizedKey, removeAuthorizedKey, } from "../ssh/authorized_keys.js";
-import { loadSshKeypair, sshAuthorizedKeysLine, } from "../ssh/identity.js";
+import { loadSshKeypair, opensshEd25519Pem, sshAuthorizedKeysLine, } from "../ssh/identity.js";
 import { ensureUserSshConfigInclude, writeHostEntry, } from "../ssh/ssh_config.js";
 import { currentReachableAddresses } from "../ssh/addresses.js";
 import { readActiveState, readIdentity, readInvites, readNetMeta, readPeers, writeActiveState, writeInvites, writeNetMeta, writePeers, } from "../store/index.js";
@@ -78,12 +78,18 @@ function splitHostPort(addr) {
     return [addr, undefined];
 }
 async function sshRedeem(token, redeem) {
-    // Write the one-time priv to a temp file (PEM PKCS#8).
+    // Write the one-time priv to a temp file in OpenSSH format. OpenSSH ≥ 8.x
+    // rejects PKCS#8 ed25519 private keys with "Load key …: invalid format",
+    // which silently falls through to publickey/password auth and fails.
     const tmpDir = await mkdtemp(join(tmpdir(), "nagent-join-"));
     const keyPath = join(tmpDir, "id_invite");
     try {
-        const priv = oneTimePrivKey(token);
-        const pem = priv.export({ format: "pem", type: "pkcs8" });
+        const rawPriv = Buffer.from(token.oneTimePriv, "base64url");
+        const rawPub = Buffer.from(token.oneTimePub, "base64url");
+        if (rawPriv.length !== 32 || rawPub.length !== 32) {
+            throw new Error("invite: malformed oneTimePub/oneTimePriv");
+        }
+        const pem = opensshEd25519Pem(rawPriv, rawPub, `nagent-invite-${token.inviteId}`);
         await writeFile(keyPath, pem, { mode: 0o600 });
         const firstAddr = token.issuerAddrs[0];
         if (!firstAddr)

@@ -6,7 +6,6 @@ import { join } from "node:path";
 import {
   assertNotExpired,
   decodeAndVerify,
-  oneTimePrivKey,
   type InviteToken,
 } from "../invite/index.js";
 import {
@@ -15,6 +14,7 @@ import {
 } from "../ssh/authorized_keys.js";
 import {
   loadSshKeypair,
+  opensshEd25519Pem,
   sshAuthorizedKeysLine,
 } from "../ssh/identity.js";
 import {
@@ -119,12 +119,18 @@ function splitHostPort(addr: string): [string, string | undefined] {
 }
 
 async function sshRedeem(token: InviteToken, redeem: JoinRedeem): Promise<JoinAccepted> {
-  // Write the one-time priv to a temp file (PEM PKCS#8).
+  // Write the one-time priv to a temp file in OpenSSH format. OpenSSH ≥ 8.x
+  // rejects PKCS#8 ed25519 private keys with "Load key …: invalid format",
+  // which silently falls through to publickey/password auth and fails.
   const tmpDir = await mkdtemp(join(tmpdir(), "nagent-join-"));
   const keyPath = join(tmpDir, "id_invite");
   try {
-    const priv = oneTimePrivKey(token);
-    const pem = priv.export({ format: "pem", type: "pkcs8" }) as string;
+    const rawPriv = Buffer.from(token.oneTimePriv, "base64url");
+    const rawPub = Buffer.from(token.oneTimePub, "base64url");
+    if (rawPriv.length !== 32 || rawPub.length !== 32) {
+      throw new Error("invite: malformed oneTimePub/oneTimePriv");
+    }
+    const pem = opensshEd25519Pem(rawPriv, rawPub, `nagent-invite-${token.inviteId}`);
     await writeFile(keyPath, pem, { mode: 0o600 });
 
     const firstAddr = token.issuerAddrs[0];

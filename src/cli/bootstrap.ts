@@ -16,6 +16,7 @@ import {
 } from "../store/index.js";
 import { writeJson } from "../store/json.js";
 import { paths } from "../platform/paths.js";
+import { opensshEd25519Pem } from "../ssh/identity.js";
 
 const BOOT_FLAG = "NAGENT_NO_BOOTSTRAP";
 const LOCK_FILE = ".bootstrap.lock";
@@ -53,8 +54,12 @@ export async function ensureIdentity(log: (line: string) => void): Promise<void>
   const nodeName = process.env.NAGENT_NODE_NAME ?? hostname() ?? "node";
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const pubDer = publicKey.export({ format: "der", type: "spki" });
-  const privPem = privateKey.export({ format: "pem", type: "pkcs8" }) as string;
+  const pubJwk = publicKey.export({ format: "jwk" }) as { x: string };
+  const privJwk = privateKey.export({ format: "jwk" }) as { d: string };
+  const rawPub = Buffer.from(pubJwk.x, "base64url");
+  const rawPriv = Buffer.from(privJwk.d, "base64url");
   const nodeId = createHash("sha256").update(pubDer).digest("hex").slice(0, 16);
+  const privPem = opensshEd25519Pem(rawPriv, rawPub, `nagent-${nodeId}`);
   await writeIdentity({
     nodeId,
     nodeName,
