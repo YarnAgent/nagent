@@ -162,6 +162,9 @@ export class Daemon {
         return;
 
       case "LIST": {
+        // Reconcile against tmux so stale catalog entries (e.g. user typed
+        // `exit` in the pane and tmux killed the session) don't appear.
+        await this.reconcileWithTmux();
         const result = this.listSessions(frame.filter);
         this.sendFrame(state, { verb: "LIST_RESULT", sessions: result });
         return;
@@ -199,6 +202,9 @@ export class Daemon {
       }
 
       case "CLOSE_SESSION": {
+        // Reconcile first so "already closed via tmux" reports a clear "unknown
+        // session" rather than killing a phantom and pretending it worked.
+        await this.reconcileWithTmux();
         const session = this.sessions.get(frame.name);
         if (!session) {
           this.sendFrame(state, { verb: "ERROR", message: `unknown session: ${frame.name}` });
@@ -306,6 +312,7 @@ export class Daemon {
       const attached = this.countAttached(meta.name);
       out.push({
         name: meta.name,
+        sessionId: meta.sessionId,
         address: `${this.nodeName}/${meta.name}`,
         ...(meta.projectId ? { project: meta.projectId } : {}),
         attached,

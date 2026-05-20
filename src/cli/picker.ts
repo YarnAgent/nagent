@@ -1,6 +1,5 @@
 import { createInterface } from "node:readline/promises";
-import { promises as fs } from "node:fs";
-import { resolve as pathResolve, basename } from "node:path";
+import { resolve as pathResolve } from "node:path";
 import { homedir } from "node:os";
 import { BusClient } from "../bus/client.js";
 import { createOrAttachTmuxSession } from "../session/index.js";
@@ -89,23 +88,15 @@ export async function runPicker(input: PickerInput): Promise<void> {
       const asNum = Number.parseInt(line, 10);
       if (!Number.isNaN(asNum) && asNum >= 1 && asNum <= state.sessions.length) {
         const entry = state.sessions[asNum - 1]!;
-        const full = await resolveSessionMeta(entry.name);
-        if (full) {
-          exitToAttach = { sessionId: full.sessionId, name: full.name, ...(full.projectId ? { projectId: full.projectId } : {}) };
-          break;
-        }
-        process.stderr.write(`session "${entry.name}" disappeared\n\n`);
-        continue;
+        exitToAttach = { sessionId: entry.sessionId, name: entry.name, ...(entry.project ? { projectId: entry.project } : {}) };
+        break;
       }
 
       // bare name → match by session name
       const named = state.sessions.find((s) => s.name === line);
       if (named) {
-        const full = await resolveSessionMeta(named.name);
-        if (full) {
-          exitToAttach = { sessionId: full.sessionId, name: full.name, ...(full.projectId ? { projectId: full.projectId } : {}) };
-          break;
-        }
+        exitToAttach = { sessionId: named.sessionId, name: named.name, ...(named.project ? { projectId: named.project } : {}) };
+        break;
       }
       process.stderr.write(`unknown input: ${line}\n\n`);
     }
@@ -262,15 +253,3 @@ async function createSessionViaClient(
   return (r as SessionCreatedFrame).session;
 }
 
-async function resolveSessionMeta(name: string): Promise<SessionMeta | undefined> {
-  try {
-    const raw = await fs.readFile(paths().sessions, "utf8");
-    const all = JSON.parse(raw) as SessionMeta[];
-    return all.find((s) => s.name === name);
-  } catch {
-    return undefined;
-  }
-}
-
-// avoid unused warnings
-void basename;

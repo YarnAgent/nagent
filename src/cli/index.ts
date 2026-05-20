@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -27,7 +26,6 @@ import type {
   ListResultFrame,
   NodeIdentity,
   SessionCreatedFrame,
-  SessionMeta,
 } from "../types/index.js";
 import { runPicker } from "./picker.js";
 import { bootstrap } from "./bootstrap.js";
@@ -141,18 +139,15 @@ async function cmdNew(name: string, opts: { project?: string | false; attach?: b
 
 async function cmdAttach(name: string): Promise<void> {
   const ctx = await loadContext();
-  await withDaemon(async (client) => {
+  const entry = await withDaemon(async (client) => {
     await sendHelloAsCli(client, ctx);
-    const r = await client.request({ verb: "LIST" });
+    const r = await client.request({ verb: "LIST", filter: { all: true } });
     if (r.verb !== "LIST_RESULT") throw new Error("LIST failed");
-    const entry = (r as ListResultFrame).sessions.find((s) => s.name === name);
-    if (!entry) throw new Error(`unknown session: ${name}`);
+    const found = (r as ListResultFrame).sessions.find((s) => s.name === name);
+    if (!found) throw new Error(`unknown session: ${name}`);
+    return found;
   });
-  // Resolve sessionId from the catalog and exec tmux attach.
-  const sessionsRaw = JSON.parse(await fs.readFile(paths().sessions, "utf8")) as SessionMeta[];
-  const fullMeta = sessionsRaw.find((s) => s.name === name);
-  if (!fullMeta) throw new Error(`session "${name}" disappeared`);
-  attachTmuxSession(tmuxSessionName(fullMeta.sessionId));
+  attachTmuxSession(tmuxSessionName(entry.sessionId));
 }
 
 async function cmdList(opts: { project?: string | false; all?: boolean }): Promise<void> {

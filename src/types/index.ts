@@ -96,6 +96,7 @@ export interface ListFrame {
 
 export interface ListResultEntry {
   name: string;
+  sessionId: string;
   address: string;
   project?: string;
   attached: number;
