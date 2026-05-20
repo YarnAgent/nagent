@@ -171,27 +171,76 @@ function shellSingleQuote(s) {
 async function cmdList(opts) {
     const ctx = await loadContext();
     const projectId = opts.all ? undefined : activeProjectIdFromCtx(ctx, opts);
-    await withDaemon(async (client) => {
-        await sendHelloAsCli(client, ctx);
-        const r = await client.request({ verb: "LIST", filter: projectId ? { project: projectId } : { all: !!opts.all } });
-        if (r.verb !== "LIST_RESULT")
-            throw new Error("LIST failed");
-        const sessions = r.sessions;
-        if (sessions.length === 0) {
-            process.stdout.write("(no sessions)\n");
+    const localSessions = await listLocalSessions(ctx, projectId, opts.all);
+    // --local (or no active net): print only local sessions, in v0.2's table
+    // shape. Used both by humans and by the fanout-RPC on each peer.
+    if (opts.local || !ctx.activeNetId) {
+        if (opts.json) {
+            const nodeName = ctx.identity?.nodeName ?? "node";
+            process.stdout.write(JSON.stringify({ v: 1, node: nodeName, sessions: localSessions }) + "\n");
             return;
         }
-        const widths = {
-            name: Math.max(4, ...sessions.map((s) => s.name.length)),
-            addr: Math.max(7, ...sessions.map((s) => s.address.length)),
-            proj: Math.max(7, ...sessions.map((s) => (s.project ?? "-").length)),
-        };
-        process.stdout.write(`${"NAME".padEnd(widths.name)}  ${"ADDRESS".padEnd(widths.addr)}  ${"PROJECT".padEnd(widths.proj)}  ATT  ROLES\n`);
-        for (const s of sessions) {
-            const roles = s.roles.length ? s.roles.join(",") : "-";
-            process.stdout.write(`${s.name.padEnd(widths.name)}  ${s.address.padEnd(widths.addr)}  ${(s.project ?? "-").padEnd(widths.proj)}  ${String(s.attached).padStart(3)}  ${roles}\n`);
-        }
+        printSessionsTable(localSessions, { withNode: false });
+        return;
+    }
+    // Net-wide path: keep local rows + fan out to peers.
+    const { fanoutSessionsAcrossNet } = await import("./list_net.js");
+    const merged = await fanoutSessionsAcrossNet({
+        activeNetId: ctx.activeNetId,
+        selfNodeName: ctx.identity?.nodeName ?? "node",
+        localSessions,
+        projectFilter: projectId,
+        includeAll: !!opts.all,
     });
+    if (opts.json) {
+        process.stdout.write(JSON.stringify({ v: 1, rows: merged.rows, unreachable: merged.unreachable }) + "\n");
+        return;
+    }
+    printNetTable(merged.rows, merged.unreachable);
+}
+async function listLocalSessions(ctx, projectId, includeAll) {
+    return withDaemon(async (client) => {
+        await sendHelloAsCli(client, ctx);
+        const r = await client.request({ verb: "LIST", filter: projectId ? { project: projectId } : { all: !!includeAll } });
+        if (r.verb !== "LIST_RESULT")
+            throw new Error("LIST failed");
+        return r.sessions;
+    });
+}
+function printSessionsTable(sessions, opts) {
+    if (sessions.length === 0) {
+        process.stdout.write("(no sessions)\n");
+        return;
+    }
+    const widths = {
+        name: Math.max(4, ...sessions.map((s) => s.name.length)),
+        addr: Math.max(7, ...sessions.map((s) => s.address.length)),
+        proj: Math.max(7, ...sessions.map((s) => (s.project ?? "-").length)),
+    };
+    const nodeCol = opts.withNode ? "NODE                  " : "";
+    process.stdout.write(`${nodeCol}${"NAME".padEnd(widths.name)}  ${"ADDRESS".padEnd(widths.addr)}  ${"PROJECT".padEnd(widths.proj)}  ATT  ROLES\n`);
+    for (const s of sessions) {
+        const roles = s.roles.length ? s.roles.join(",") : "-";
+        process.stdout.write(`${s.name.padEnd(widths.name)}  ${s.address.padEnd(widths.addr)}  ${(s.project ?? "-").padEnd(widths.proj)}  ${String(s.attached).padStart(3)}  ${roles}\n`);
+    }
+}
+function printNetTable(rows, unreachable) {
+    if (rows.length === 0 && unreachable.length === 0) {
+        process.stdout.write("(no sessions)\n");
+        return;
+    }
+    const nodeWidth = Math.max(4, ...rows.map((r) => r.node.length), ...unreachable.map((n) => n.length));
+    const nameWidth = Math.max(4, ...rows.map((r) => r.session.name.length));
+    const addrWidth = Math.max(7, ...rows.map((r) => r.session.address.length));
+    const projWidth = Math.max(7, ...rows.map((r) => (r.session.project ?? "-").length));
+    process.stdout.write(`${"NODE".padEnd(nodeWidth)}  ${"NAME".padEnd(nameWidth)}  ${"ADDRESS".padEnd(addrWidth)}  ${"PROJECT".padEnd(projWidth)}  ATT  ROLES\n`);
+    for (const { node, session: s } of rows) {
+        const roles = s.roles.length ? s.roles.join(",") : "-";
+        process.stdout.write(`${node.padEnd(nodeWidth)}  ${s.name.padEnd(nameWidth)}  ${s.address.padEnd(addrWidth)}  ${(s.project ?? "-").padEnd(projWidth)}  ${String(s.attached).padStart(3)}  ${roles}\n`);
+    }
+    for (const node of unreachable) {
+        process.stdout.write(`${node.padEnd(nodeWidth)}  (unreachable)\n`);
+    }
 }
 async function cmdClose(name) {
     const ctx = await loadContext();
@@ -372,9 +421,11 @@ async function main() {
     const listCmd = program
         .command("list")
         .alias("ls")
-        .description("list sessions")
+        .description("list sessions across the active net (use --local for v0.2 behavior)")
         .option("-p, --project <id>", "filter by project")
         .option("-a, --all", "show all projects")
+        .option("--local", "list only sessions on this node (no peer fanout)")
+        .option("--json", "machine-readable output (one JSON object on stdout)")
         .action(bootstrapped(async (opts) => { await cmdList(opts); }));
     void listCmd;
     program
