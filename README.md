@@ -2,7 +2,7 @@
 
 > Agent net — a decentralized mesh CLI for cooperating agents across nodes.
 >
-> **v0.1 status**: single-node only. Every concept (node, net, project, session, bus) works on one machine. Multi-node mesh / SSH wiring / web stream are in the TODO list (see `docs/architecture/adr/` and the v0.1 plan).
+> **v0.2 status (in progress on `main`)**: hub-and-spoke multi-node. `nagent join <token>` connects a new device to an existing net via an invite issued by an existing peer; `nagent attach <peer>/<session>` SSH-execs into the remote node's `nagent attach` and you're inside the remote tmux. Cross-node bus (`send`/`recv` across the mesh) and full peer-to-peer trust are in v0.3.
 
 ## Documentation
 
@@ -11,6 +11,16 @@
 - [System Design](docs/system_design.md)
 - [Architecture Overview](docs/architecture/README.md)
 - [Architecture Decision Records](docs/architecture/adr/)
+
+## Installing on a second device (v0.2)
+
+Prereqs on the target: macOS or Linux, Node ≥22, tmux ≥3.0, OpenSSH client.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/YarnAgent/nagent/main/scripts/install.sh | bash
+```
+
+Under the hood this runs `npm install -g 'github:YarnAgent/nagent#main'` (the `prepare` script in our `package.json` compiles TS to `dist/`). Test it with `nagent --version`.
 
 ## Verify v0.1 on this device
 
@@ -92,6 +102,28 @@ echo '{"q":"status?"}' | NAGENT_SESSION=alpha NAGENT_NODE=$(hostname) \
 - `~/.nagent/` is the per-user root. Override with `NAGENT_HOME=/path/to/dir` for isolated testing.
 - The dedicated tmux socket is `tmux -L nagent` — your own `tmux ls` and `nagent list` never collide.
 - The auto-spawned daemon logs to `~/.nagent/daemon.log` and writes its pid to `~/.nagent/daemon.pid`. Set `NAGENT_NO_BOOTSTRAP=1` to bypass auto-bootstrap (used by tests).
+
+## Two-node verification (v0.2)
+
+On the **issuer** (already running nagent, has a session you want to share):
+
+```sh
+nagent                            # open picker, then at the prompt:
+> /invite --expires 1h            # prints a base64url token; copy it
+> q
+```
+
+On the **joiner** (a fresh device after running the installer):
+
+```sh
+nagent join <token>               # SSHes to the issuer once, exchanges keys,
+                                  # writes ~/.nagent/ssh_config + authorized_keys
+nagent attach <issuerName>/<sess> # opens the issuer's session — Ctrl-Q to detach
+```
+
+The join handshake uses a one-time SSH key embedded in the token: the issuer's `~/.ssh/authorized_keys` gets a `command="nagent join-respond <id>",no-pty,...` entry, the joiner SSHes with the token's key, runs the constrained command (which can do nothing but the redeem RPC), receives the net's peer list + authority chain, and the one-time entry is removed. Both sides end up with each other's long-term ed25519 pubkeys in `authorized_keys`.
+
+Hub-and-spoke: joiners can attach to the issuer (and to any peer whose `authorized_keys` was wired during their own join). v0.3 adds gossip so joiner-to-joiner attach works without re-inviting.
 
 ## Project Structure
 

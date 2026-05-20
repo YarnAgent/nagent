@@ -52,8 +52,8 @@ describe("slash dispatcher", () => {
     expect(existsSync(join(cwd, ".nagent"))).toBe(true);
   });
 
-  it("deferred slash `/invite` prints the v0.2 notice without throwing", async () => {
-    const r = await dispatchSlash("invite", sink);
+  it("deferred slash `/web` prints the v0.3 notice without throwing", async () => {
+    const r = await dispatchSlash("web", sink);
     expect(out.log).toMatch(/not yet implemented/);
     expect(r.exitPicker).toBeFalsy();
   });

@@ -29,6 +29,7 @@ import type {
 } from "../types/index.js";
 import { runPicker } from "./picker.js";
 import { bootstrap } from "./bootstrap.js";
+import { cmdJoin, cmdJoinRespond } from "./join.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -141,6 +142,16 @@ async function cmdNew(name: string, opts: { project?: string | false; attach?: b
 }
 
 async function cmdAttach(name: string): Promise<void> {
+  // Cross-node form: `nagent attach <peer>/<session>` → SSH-exec the remote nagent.
+  const slash = name.indexOf("/");
+  if (slash > 0) {
+    const peer = name.slice(0, slash);
+    const sess = name.slice(slash + 1);
+    if (!peer || !sess) throw new Error(`attach target needs both peer and session: ${name}`);
+    await attachRemote(peer, sess);
+    return;
+  }
+
   const ctx = await loadContext();
   const entry = await withDaemon(async (client) => {
     await sendHelloAsCli(client, ctx);
@@ -151,6 +162,35 @@ async function cmdAttach(name: string): Promise<void> {
     return found;
   });
   attachTmuxSession(tmuxSessionName(entry.sessionId));
+}
+
+async function attachRemote(peer: string, sess: string): Promise<void> {
+  const ctx = await loadContext();
+  if (!ctx.activeNetId) throw new Error("no active net");
+  const peers = (await import("../store/index.js")).readPeers;
+  const list = await peers(ctx.activeNetId);
+  const target = list.find((p) => p.nodeName === peer);
+  if (!target) throw new Error(`unknown peer: ${peer} (peers: ${list.map((p) => p.nodeName).join(", ")})`);
+  // The ssh_config entry `Host nagent.<peer>` is the source of truth for host/user/identity.
+  // SSH joins all post-host args with spaces into a single command string the
+  // remote login shell re-parses, so we do our own quoting. We invoke through
+  // `bash -ilc` (interactive + login) because most nvm/mise/volta setups guard
+  // their bashrc with `[ -z "$PS1" ] && return` — only an interactive shell will
+  // actually source the version-manager and put `nagent` on PATH.
+  const innerCmd = `nagent attach ${shellSingleQuote(sess)}`;
+  const remoteCmd = `bash -ilc ${shellSingleQuote(innerCmd)}`;
+  const { spawnSync } = await import("node:child_process");
+  const r = spawnSync(
+    "ssh",
+    ["-t", `nagent.${peer}`, "--", remoteCmd],
+    { stdio: "inherit" },
+  );
+  process.exit(r.status ?? 0);
+}
+
+function shellSingleQuote(s: string): string {
+  if (/^[A-Za-z0-9_.-]+$/.test(s)) return s;
+  return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
 async function cmdList(opts: { project?: string | false; all?: boolean }): Promise<void> {
@@ -390,6 +430,23 @@ async function main(): Promise<void> {
     .command("register-role <role>")
     .description("tag the current session with a role (e.g. agent-alpha)")
     .action(bootstrapped(async (role: string) => { await cmdRegisterRole(role); }));
+
+  program
+    .command("join <token>")
+    .description("join an existing net via an invite token")
+    .action(bootstrapped(async (token: string) => { await cmdJoin(token); }));
+
+  // Internal — only invoked via SSH `command=` restriction during a join.
+  // Marked hidden so it doesn't appear in --help noise.
+  const joinRespondCmd = program
+    .command("join-respond <inviteId>")
+    .description("(internal) handle an inbound join redemption from stdin")
+    .action(async (inviteId: string) => {
+      process.env.NAGENT_NO_BOOTSTRAP = "1";
+      await cmdJoinRespond(inviteId);
+    });
+  // commander v14 doesn't expose `hidden` in chained form; flip the flag directly.
+  (joinRespondCmd as unknown as { _hidden: boolean })._hidden = true;
 
   try {
     await program.parseAsync(process.argv);

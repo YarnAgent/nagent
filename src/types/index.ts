@@ -11,10 +11,48 @@ export interface NodeIdentity {
 
 export interface Peer {
   nodeName: string;
-  pubKey: string;
-  addresses: string[];
+  pubKey: string;             // base64url raw 32-byte ed25519 pub
+  addresses: string[];        // "host:port" strings (port=22 if absent)
+  sshUser?: string;
   roles: string[];
   lastSeen?: Iso;
+}
+
+export interface InviteRecord {
+  inviteId: string;
+  oneTimePub: string;         // base64url raw 32 bytes
+  netId: string;
+  expiresAt: Iso;
+  state: "pending" | "redeemed" | "expired" | "revoked";
+  createdAt: Iso;
+  redeemedAt?: Iso;
+  redeemedBy?: string;
+  flags?: { reusable?: boolean; tags?: Record<string, string> };
+}
+
+export interface JoinRedeem {
+  v: 1;
+  joinerNode: string;
+  joinerNodeId: string;
+  joinerPubKey: string;       // base64url raw 32 bytes
+  joinerSshUser: string;
+  joinerAddresses?: string[]; // optional — so issuer can ssh back
+}
+
+export interface JoinAccepted {
+  v: 1;
+  netId: string;
+  netName: string;
+  peers: Peer[];              // includes the issuer
+  authority: { originPubKey: string; delegations: unknown[] };
+  issuerPub: string;
+  issuerSshUser: string;
+  issuerAddrs: string[];
+}
+
+export interface JoinRejected {
+  v: 1;
+  error: string;
 }
 
 export interface NetMeta {

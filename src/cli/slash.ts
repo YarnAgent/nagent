@@ -13,6 +13,8 @@ import {
 import { writeJson } from "../store/json.js";
 import { paths } from "../platform/paths.js";
 import { createProject } from "../project/index.js";
+import { generateInvite } from "./invite.js";
+import { cmdJoin } from "./join.js";
 
 export interface SlashOutcome {
   /** Exit the picker REPL after this command. */
@@ -202,12 +204,42 @@ const TABLE: SlashEntry[] = [
     handler: deferredHandler("project clone", "v0.2"),
   },
 
-  // deferred net ops
-  { verb: "invite",           argHint: "[opts]",    description: "[v0.2] issue an invite token", handler: deferredHandler("invite", "v0.2") },
-  { verb: "join",             argHint: "<token>",   description: "[v0.2] join a net via invite", handler: deferredHandler("join", "v0.2") },
+  // invite / join (real handlers in v0.2)
+  {
+    verb: "invite",
+    argHint: "[--expires 1h] [--addr host[:port]]",
+    description: "issue an invite token for another device to join this net",
+    handler: async (args, out) => {
+      const opts = parseInviteArgs(args);
+      try {
+        const r = await generateInvite(opts);
+        out.log("");
+        out.log("invite token (paste on the joining device):");
+        out.log("");
+        out.log("  " + r.token);
+        out.log("");
+        out.log(`  inviteId: ${r.inviteId}`);
+        out.log(`  expires:  ${r.expiresAt}`);
+        out.log("");
+        out.log("on the joiner: nagent join <token>");
+      } catch (err) { out.err((err as Error).message); }
+      return {};
+    },
+  },
+  {
+    verb: "join",
+    argHint: "<token>",
+    description: "join an existing net via an invite token",
+    handler: async (args, out) => {
+      const token = args[0];
+      if (!token) { out.err("usage: /join <token>"); return {}; }
+      try { await cmdJoin(token); } catch (err) { out.err((err as Error).message); }
+      return {};
+    },
+  },
   { verb: "web",              argHint: "",          description: "[v0.3] start the browser stream", handler: deferredHandler("web", "v0.3") },
-  { verb: "install-service",  argHint: "",          description: "[v0.2] install platform daemon unit", handler: deferredHandler("install-service", "v0.2") },
-  { verb: "uninstall-service",argHint: "",          description: "[v0.2] remove platform daemon unit", handler: deferredHandler("uninstall-service", "v0.2") },
+  { verb: "install-service",  argHint: "",          description: "[v0.3] install platform daemon unit", handler: deferredHandler("install-service", "v0.3") },
+  { verb: "uninstall-service",argHint: "",          description: "[v0.3] remove platform daemon unit", handler: deferredHandler("uninstall-service", "v0.3") },
 
   // quit
   {
@@ -247,4 +279,19 @@ export async function dispatchSlash(line: string, out: SlashOut): Promise<SlashO
 /** Used by tests + /help to enumerate the table. */
 export function slashCommands(): ReadonlyArray<{ verb: string; sub?: string; description: string }> {
   return TABLE.map((e) => ({ verb: e.verb, ...(e.sub !== undefined ? { sub: e.sub } : {}), description: e.description }));
+}
+
+function parseInviteArgs(args: string[]): { expires?: string; addr?: string[]; tag?: string[] } {
+  const out: { expires?: string; addr?: string[]; tag?: string[] } = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--expires" && args[i + 1]) { out.expires = args[++i]; continue; }
+    if (a === "--addr" && args[i + 1]) {
+      (out.addr ||= []).push(args[++i]!); continue;
+    }
+    if (a === "--tag" && args[i + 1]) {
+      (out.tag ||= []).push(args[++i]!); continue;
+    }
+  }
+  return out;
 }

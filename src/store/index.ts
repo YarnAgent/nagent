@@ -3,6 +3,7 @@ import { paths } from "../platform/paths.js";
 import { ensureDir, readJson, writeJson } from "./json.js";
 import type {
   ActiveState,
+  InviteRecord,
   NetMeta,
   NodeIdentity,
   Peer,
@@ -69,4 +70,12 @@ export async function readProjects(netId: string): Promise<Project[]> {
 }
 export async function writeProjects(netId: string, projects: Project[]): Promise<void> {
   await writeJson(paths().netProjects(netId), projects);
+}
+
+// invites (issued by this node)
+export async function readInvites(): Promise<InviteRecord[]> {
+  return (await readJson<InviteRecord[]>(paths().invites)) ?? [];
+}
+export async function writeInvites(records: InviteRecord[]): Promise<void> {
+  await writeJson(paths().invites, records);
 }
