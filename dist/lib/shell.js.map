@@ -1,0 +1,1 @@
+{"version":3,"file":"shell.js","sourceRoot":"","sources":["../../src/lib/shell.ts"],"names":[],"mappings":"AAAA;;;;;;;;GAQG;AACH,MAAM,UAAU,gBAAgB,CAAC,CAAS;IACxC,IAAI,mBAAmB,CAAC,IAAI,CAAC,CAAC,CAAC;QAAE,OAAO,CAAC,CAAC;IAC1C,OAAO,IAAI,CAAC,CAAC,OAAO,CAAC,IAAI,EAAE,OAAO,CAAC,GAAG,CAAC;AACzC,CAAC"}

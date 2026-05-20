@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { readPeers } from "../store/index.js";
 import { runWithConcurrency } from "../gossip/index.js";
+import { shellSingleQuote } from "../lib/shell.js";
 /**
  * Fan out `nagent list --local --json` to every peer in the active net,
  * merge results with the local sessions, and return a flat row list plus the
@@ -94,10 +95,5 @@ async function sshListLocal(sshHost, remoteArgs, timeoutMs) {
             }
         });
     });
-}
-function shellSingleQuote(s) {
-    if (/^[A-Za-z0-9_.-]+$/.test(s))
-        return s;
-    return `'${s.replace(/'/g, "'\\''")}'`;
 }
 //# sourceMappingURL=list_net.js.map

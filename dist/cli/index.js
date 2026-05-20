@@ -16,6 +16,7 @@ import { cmdJoin, cmdJoinRespond } from "./join.js";
 import { cmdGossipAddPeer } from "./gossip.js";
 import { attachLine, attachMosh } from "./attach_modes.js";
 import { cmdAttachLineServer } from "./attach_line_server.js";
+import { shellSingleQuote } from "../lib/shell.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 function readPackageVersion() {
     try {
@@ -173,11 +174,6 @@ async function attachRemote(peer, sess, opts) {
     const { spawnSync } = await import("node:child_process");
     const r = spawnSync("ssh", ["-t", sshHost, "--", remoteCmd], { stdio: "inherit" });
     process.exit(r.status ?? 0);
-}
-function shellSingleQuote(s) {
-    if (/^[A-Za-z0-9_.-]+$/.test(s))
-        return s;
-    return `'${s.replace(/'/g, "'\\''")}'`;
 }
 async function cmdList(opts) {
     const ctx = await loadContext();

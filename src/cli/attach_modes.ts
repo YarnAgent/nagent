@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
+import { shellSingleQuote } from "../lib/shell.js";
 
 /**
  * `nagent attach <peer>/<session> --mosh` — shell out to mosh-client when
@@ -111,7 +112,3 @@ export async function attachLine(sshHost: string, remoteSession: string): Promis
   return new Promise<never>(() => {});
 }
 
-function shellSingleQuote(s: string): string {
-  if (/^[A-Za-z0-9_.-]+$/.test(s)) return s;
-  return `'${s.replace(/'/g, "'\\''")}'`;
-}

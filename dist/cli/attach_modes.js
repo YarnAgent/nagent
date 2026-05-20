@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
+import { shellSingleQuote } from "../lib/shell.js";
 /**
  * `nagent attach <peer>/<session> --mosh` — shell out to mosh-client when
  * both ends have mosh installed. Mosh handles predictive local echo + UDP
@@ -96,10 +97,5 @@ export async function attachLine(sshHost, remoteSession) {
     });
     // Block the function — we exit via child.on('exit') above.
     return new Promise(() => { });
-}
-function shellSingleQuote(s) {
-    if (/^[A-Za-z0-9_.-]+$/.test(s))
-        return s;
-    return `'${s.replace(/'/g, "'\\''")}'`;
 }
 //# sourceMappingURL=attach_modes.js.map

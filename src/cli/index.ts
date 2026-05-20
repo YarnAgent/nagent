@@ -33,6 +33,7 @@ import { cmdJoin, cmdJoinRespond } from "./join.js";
 import { cmdGossipAddPeer } from "./gossip.js";
 import { attachLine, attachMosh } from "./attach_modes.js";
 import { cmdAttachLineServer } from "./attach_line_server.js";
+import { shellSingleQuote } from "../lib/shell.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -206,10 +207,6 @@ async function attachRemote(peer: string, sess: string, opts: AttachOpts): Promi
   process.exit(r.status ?? 0);
 }
 
-function shellSingleQuote(s: string): string {
-  if (/^[A-Za-z0-9_.-]+$/.test(s)) return s;
-  return `'${s.replace(/'/g, "'\\''")}'`;
-}
 
 interface ListOpts {
   project?: string | false;

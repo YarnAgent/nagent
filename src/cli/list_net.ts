@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { readPeers } from "../store/index.js";
 import { runWithConcurrency } from "../gossip/index.js";
+import { shellSingleQuote } from "../lib/shell.js";
 import type { ListResultEntry } from "../types/index.js";
 
 interface FanoutInput {
@@ -126,7 +127,3 @@ async function sshListLocal(
   });
 }
 
-function shellSingleQuote(s: string): string {
-  if (/^[A-Za-z0-9_.-]+$/.test(s)) return s;
-  return `'${s.replace(/'/g, "'\\''")}'`;
-}
