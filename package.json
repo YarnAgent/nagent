@@ -21,7 +21,8 @@
     "dev:daemon": "tsx src/cli/index.ts daemon --foreground",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepare": "node -e \"process.exit(0)\""
   },
   "dependencies": {
     "commander": "^14.0.0"
