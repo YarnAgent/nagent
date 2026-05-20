@@ -17,12 +17,34 @@ info()  { printf '%s\n' "${BLUE}nagent-install:${RESET} $*"; }
 ok()    { printf '%s\n' "${GREEN}nagent-install:${RESET} $*"; }
 die()   { printf '%s\n' "${RED}nagent-install:${RESET} $*" >&2; exit 1; }
 
-REPO="${NAGENT_INSTALL_REPO:-github:YarnAgent/nagent#main}"
+# Install spec. We intentionally use the plain codeload tarball URL rather
+# than `github:YarnAgent/nagent#<ref>`. With the `github:` shorthand, npm/pacote
+# leaves `lib/node_modules/nagent` as a dangling symlink into its
+# `_cacache/tmp/git-clone*` dir (which is wiped post-install) — so npm reports
+# success but `nagent --version` is "command not found". The codeload URL
+# avoids that path and materializes the package correctly.
+NAGENT_INSTALL_REF="${NAGENT_INSTALL_REF:-main}"
+REPO="${NAGENT_INSTALL_REPO:-https://codeload.github.com/YarnAgent/nagent/tar.gz/${NAGENT_INSTALL_REF}}"
 
 case "$(uname -s)" in
   Darwin|Linux) ;;
   *) die "nagent supports macOS and Linux only (got $(uname -s))." ;;
 esac
+
+# `curl ... | bash` does not source ~/.zshrc, so users with Node managed by
+# nvm/fnm/mise see only the system PATH — often a stale Node. Source the
+# common managers if present so the prereq check sees the user's real toolchain.
+if [ -z "${NVM_DIR:-}" ] && [ -s "${HOME}/.nvm/nvm.sh" ]; then
+  export NVM_DIR="${HOME}/.nvm"
+  # shellcheck disable=SC1091
+  \. "${NVM_DIR}/nvm.sh" >/dev/null 2>&1 || true
+fi
+if [ -s "${HOME}/.local/share/fnm/fnm" ] && command -v fnm >/dev/null 2>&1; then
+  eval "$(fnm env --use-on-cd 2>/dev/null || true)"
+fi
+if [ -d "${HOME}/.local/share/mise" ] && command -v mise >/dev/null 2>&1; then
+  eval "$(mise env -s sh 2>/dev/null || true)"
+fi
 
 command -v node >/dev/null 2>&1 || die "Node.js >= 22 is required. Install from https://nodejs.org/ or use nvm."
 
