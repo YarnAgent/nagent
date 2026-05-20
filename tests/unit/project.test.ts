@@ -36,6 +36,19 @@ describe("project cwd-walker", () => {
     expect(r?.dir).toBe(dir);
   });
 
+  it("skips a directory at the .nagent path and keeps walking", async () => {
+    // Reproduces the home/marker name collision (~/.nagent is a dir, project marker is a file).
+    const top = await mkdtemp(join(tmpdir(), "nagent-walk-"));
+    const homeLike = join(top, "home");
+    const nested = join(homeLike, "proj", "child");
+    await fs.mkdir(join(homeLike, ".nagent"), { recursive: true });
+    await fs.mkdir(nested, { recursive: true });
+    // No marker file anywhere on the path → walker must return undefined, not EISDIR.
+    const r = await findProjectMarker(nested);
+    expect(r).toBeUndefined();
+    await rm(top, { recursive: true, force: true });
+  });
+
   it("walks up to find a marker in an ancestor", async () => {
     const nested = join(dir, "a", "b", "c");
     await fs.mkdir(nested, { recursive: true });

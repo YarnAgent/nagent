@@ -11,7 +11,16 @@ export function newProjectId(): string {
 }
 
 export async function readMarkerAt(dir: string): Promise<ProjectMarker | undefined> {
-  return readJson<ProjectMarker>(join(dir, PROJECT_MARKER_FILE));
+  try {
+    return await readJson<ProjectMarker>(join(dir, PROJECT_MARKER_FILE));
+  } catch (err) {
+    // The marker name `.nagent` collides with the user's nagent home directory
+    // (typically `~/.nagent`). When `findProjectMarker` walks up through that
+    // ancestor it would otherwise EISDIR. Treat directory collisions as "not a
+    // marker, keep walking".
+    if ((err as NodeJS.ErrnoException).code === "EISDIR") return undefined;
+    throw err;
+  }
 }
 
 export async function writeMarkerAt(dir: string, marker: ProjectMarker): Promise<void> {
