@@ -21,37 +21,45 @@ Prerequisites: `tmux ≥ 3.0`, Node ≥ 22. (This repo has been validated on WSL
 ```sh
 cd /root/proj/nagent
 npm install
-npm run build
-chmod +x dist/cli/index.js
+npm run build && chmod +x dist/cli/index.js
 npm link    # registers `nagent` on PATH
 ```
 
-**Terminal 1 — run the daemon**
+**Just use it (no manual init, no manual daemon)**
 
 ```sh
-nagent daemon --foreground
-```
-
-**Terminal 2 — exercise the v0.1 surface**
-
-```sh
-nagent init                  # generates identity at ~/.nagent/
-nagent net create demo       # local net of 1
 mkdir -p /tmp/nagent-demo && cd /tmp/nagent-demo
-nagent project init demo-proj
-nagent project list
-nagent new alpha             # creates + attaches; you're in a tmux pane now
-# inside the pane:
-#   nagent register-role agent-alpha
-#   Ctrl-B d  (detach — session persists)
+nagent                       # auto-bootstrap: identity → default net → daemon
+                             # then the picker REPL opens. At the prompt:
+                             #   /help
+                             #   /project init demo-proj
+                             #   n                      ← creates a session
+                             #   alpha                  ← name when prompted
+                             # You're attached to a tmux pane. Inside:
+                             #   nagent register-role agent-alpha
+                             #   Ctrl-B d               (detach — session persists)
 ```
+
+**Top-level CLI is sessions-only**
+
+```sh
+nagent ls                    # list sessions (alias: `nagent list`)
+nagent new beta              # create + attach
+nagent attach alpha          # attach an existing one
+nagent close beta            # destroy a session (with explicit name from outside)
+nagent send <addr> [json]    # bus send  (uses NAGENT_SESSION env if set)
+nagent recv --subscribe X    # bus receive (line-oriented JSON frames)
+nagent register-role <role>  # tag the current session
+nagent daemon --foreground   # run nagentd in the foreground (admin/debug)
+```
+
+Net + project + deferred verbs are **slash commands inside the picker** (`/net create`, `/net status`, `/net list`, `/net switch`, `/project init`, `/project list`, `/project switch`, `/project clone` *(v0.2)*, `/invite` *(v0.2)*, `/join` *(v0.2)*, `/web` *(v0.3)*, `/help`, `/quit`).
 
 **Headline test — cross-session agent messaging**
 
 ```sh
-# create a second session
+cd /tmp/nagent-demo
 nagent new beta --no-attach
-# tag it from outside (because we didn't attach)
 NAGENT_SESSION=beta NAGENT_NODE=$(hostname) nagent register-role agent-beta
 
 # subscribe in one terminal (the "beta agent")
@@ -66,17 +74,15 @@ echo '{"q":"status?"}' | NAGENT_SESSION=alpha NAGENT_NODE=$(hostname) \
 **Persistence & close**
 
 ```sh
-nagent list                  # alpha + beta with attach counts
-# restart the daemon (Ctrl-C terminal 1, then `nagent daemon --foreground` again)
-nagent list                  # still there — tmux kept them alive
-nagent close beta            # destroys beta; tmux session removed
+# Kill the daemon: `kill $(jq -r .pid ~/.nagent/daemon.pid)` — next `nagent` respawns it.
+# tmux sessions survive across daemon restarts.
 ```
 
 **Notes**
 
 - `~/.nagent/` is the per-user root. Override with `NAGENT_HOME=/path/to/dir` for isolated testing.
 - The dedicated tmux socket is `tmux -L nagent` — your own `tmux ls` and `nagent list` never collide.
-- Deferred verbs (`invite`, `join`, `web`, `project clone`, `install-service`) exit with code 64 and a `deferred to v0.2` notice.
+- The auto-spawned daemon logs to `~/.nagent/daemon.log` and writes its pid to `~/.nagent/daemon.pid`. Set `NAGENT_NO_BOOTSTRAP=1` to bypass auto-bootstrap (used by tests).
 
 ## Project Structure
 

@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { promises as fs } from "node:fs";
-import { hostname } from "node:os";
-import { resolve as resolvePath } from "node:path";
-import { generateKeyPairSync, createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -11,24 +9,12 @@ import { dirname, join } from "node:path";
 import {
   ensureNagentRoot,
   readActiveState,
-  writeActiveState,
   readIdentity,
-  writeIdentity,
-  listNets,
-  readNetMeta,
-  writeNetMeta,
-  writePeers,
-  readPeers,
-  readProjects,
 } from "../store/index.js";
-import { writeJson } from "../store/json.js";
 import { paths } from "../platform/paths.js";
 import { BusClient } from "../bus/client.js";
 import { runDaemon } from "../daemon/index.js";
-import {
-  createProject,
-  findProjectMarker,
-} from "../project/index.js";
+import { findProjectMarker } from "../project/index.js";
 import {
   checkTmuxVersion,
   createOrAttachTmuxSession,
@@ -44,6 +30,7 @@ import type {
   SessionMeta,
 } from "../types/index.js";
 import { runPicker } from "./picker.js";
+import { bootstrap } from "./bootstrap.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -63,12 +50,9 @@ interface CliContext {
   cwdProject: Awaited<ReturnType<typeof findProjectMarker>>;
 }
 
-async function loadContext(opts: { allowNoIdentity?: boolean } = {}): Promise<CliContext> {
+async function loadContext(): Promise<CliContext> {
   await ensureNagentRoot();
   const identity = await readIdentity();
-  if (!identity && !opts.allowNoIdentity) {
-    throw new Error("nagent is not initialized on this device — run `nagent init` first");
-  }
   const active = await readActiveState();
   const cwdProject = await findProjectMarker(process.cwd());
   return {
@@ -82,7 +66,7 @@ async function loadContext(opts: { allowNoIdentity?: boolean } = {}): Promise<Cl
 type ProjectOpt = { project?: string | false };
 
 function activeProjectIdFromCtx(ctx: CliContext, cliOpts: ProjectOpt): string | undefined {
-  if (cliOpts.project === false) return undefined; // --no-project
+  if (cliOpts.project === false) return undefined;
   if (typeof cliOpts.project === "string") return cliOpts.project;
   if (ctx.cwdProject) return ctx.cwdProject.marker.projectId;
   if (ctx.activeProjectId) return ctx.activeProjectId;
@@ -96,7 +80,7 @@ async function withDaemon<T>(fn: (client: BusClient) => Promise<T>): Promise<T> 
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
     if (e.code === "ENOENT" || e.code === "ECONNREFUSED") {
-      throw new Error(`cannot reach nagentd on ${paths().socket} — run \`nagent daemon --foreground\` in another terminal`);
+      throw new Error(`cannot reach nagentd on ${paths().socket}`);
     }
     throw err;
   }
@@ -133,134 +117,6 @@ async function sendHelloAsSession(client: BusClient, sessionName: string, projec
 
 // ----- commands -----
 
-async function cmdInit(opts: { noService?: boolean; force?: boolean; name?: string }): Promise<void> {
-  await ensureNagentRoot();
-  const existing = await readIdentity();
-  if (existing && !opts.force) {
-    process.stderr.write(`nagent already initialized as node "${existing.nodeName}" (${existing.nodeId})\n`);
-    return;
-  }
-  const nodeName = opts.name ?? process.env.NAGENT_NODE_NAME ?? hostname() ?? "node";
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const pubDer = publicKey.export({ format: "der", type: "spki" });
-  const privPem = privateKey.export({ format: "pem", type: "pkcs8" }) as string;
-  const nodeId = createHash("sha256").update(pubDer).digest("hex").slice(0, 16);
-
-  const identity: NodeIdentity = {
-    nodeId,
-    nodeName,
-    ed25519Pub: pubDer.toString("base64"),
-    createdAt: new Date().toISOString(),
-  };
-  await writeIdentity(identity);
-
-  await fs.mkdir(paths().sshDir, { recursive: true, mode: 0o700 });
-  await fs.writeFile(paths().sshKey, privPem, { mode: 0o600 });
-  await fs.writeFile(paths().sshPub, identity.ed25519Pub + "\n", { mode: 0o644 });
-
-  process.stdout.write(`initialized nagent as node "${nodeName}" (${nodeId})\n`);
-  process.stdout.write(`  config: ${paths().root}\n`);
-  if (!opts.noService) {
-    process.stdout.write(`  note: service installation (launchd/systemd) is deferred in v0.1.\n`);
-    process.stdout.write(`        run \`nagent daemon --foreground\` to start the daemon.\n`);
-  }
-}
-
-async function cmdNetCreate(name: string): Promise<void> {
-  const ctx = await loadContext();
-  const id = ctx.identity!;
-  const netId = `n-${randomBytes(6).toString("hex")}`;
-  const meta = {
-    netId,
-    name,
-    createdAt: new Date().toISOString(),
-    originNode: id.nodeName,
-  };
-  await writeNetMeta(meta);
-  await writePeers(netId, [
-    {
-      nodeName: id.nodeName,
-      pubKey: id.ed25519Pub,
-      addresses: [],
-      roles: [],
-      lastSeen: meta.createdAt,
-    },
-  ]);
-  await writeJson(paths().netAuthority(netId), { originPubKey: id.ed25519Pub, delegations: [] });
-  await writeJson(paths().netProjects(netId), []);
-  await writeActiveState({ activeNetId: netId });
-  process.stdout.write(`created net "${name}" (${netId}); now active\n`);
-}
-
-async function cmdNetStatus(): Promise<void> {
-  const ctx = await loadContext();
-  if (!ctx.activeNetId) {
-    process.stdout.write("no active net — run `nagent net create <name>`\n");
-    return;
-  }
-  const meta = await readNetMeta(ctx.activeNetId);
-  const peers = await readPeers(ctx.activeNetId);
-  process.stdout.write(`net: ${meta?.name} (${ctx.activeNetId})\n`);
-  process.stdout.write(`origin: ${meta?.originNode}\n`);
-  process.stdout.write(`peers (${peers.length}):\n`);
-  for (const p of peers) process.stdout.write(`  - ${p.nodeName}\n`);
-}
-
-async function cmdNetList(): Promise<void> {
-  const nets = await listNets();
-  if (nets.length === 0) {
-    process.stdout.write("no nets — run `nagent net create <name>`\n");
-    return;
-  }
-  for (const n of nets) {
-    process.stdout.write(`${n.netId}  ${n.name}  (origin ${n.originNode})\n`);
-  }
-}
-
-async function cmdProjectInit(name: string, opts: { description?: string }): Promise<void> {
-  const ctx = await loadContext();
-  if (!ctx.activeNetId) throw new Error("no active net — run `nagent net create <name>` first");
-  const id = ctx.identity!;
-  const { project } = await createProject({
-    cwd: process.cwd(),
-    name,
-    netId: ctx.activeNetId,
-    nodeName: id.nodeName,
-    ...(opts.description ? { description: opts.description } : {}),
-  });
-  await writeActiveState({ activeNetId: ctx.activeNetId, activeProjectId: project.projectId });
-  process.stdout.write(`created project "${name}" (${project.projectId})\n`);
-  process.stdout.write(`  marker: ${process.cwd()}/.nagent\n`);
-}
-
-async function cmdProjectList(): Promise<void> {
-  const ctx = await loadContext();
-  if (!ctx.activeNetId) {
-    process.stdout.write("no active net\n");
-    return;
-  }
-  const projects = await readProjects(ctx.activeNetId);
-  if (projects.length === 0) {
-    process.stdout.write("no projects in this net\n");
-    return;
-  }
-  for (const p of projects) {
-    const marker = ctx.cwdProject?.marker.projectId === p.projectId ? "  *cwd" : "";
-    const active = ctx.activeProjectId === p.projectId ? "  *active" : "";
-    process.stdout.write(`${p.projectId}  ${p.name}${active}${marker}\n`);
-  }
-}
-
-async function cmdProjectSwitch(idOrName: string): Promise<void> {
-  const ctx = await loadContext();
-  if (!ctx.activeNetId) throw new Error("no active net");
-  const projects = await readProjects(ctx.activeNetId);
-  const project = projects.find((p) => p.projectId === idOrName || p.name === idOrName);
-  if (!project) throw new Error(`unknown project: ${idOrName}`);
-  await writeActiveState({ activeNetId: ctx.activeNetId, activeProjectId: project.projectId });
-  process.stdout.write(`active project → ${project.name} (${project.projectId})\n`);
-}
-
 async function cmdNew(name: string, opts: { project?: string | false; attach?: boolean }): Promise<void> {
   const tmuxOk = checkTmuxVersion();
   if (!tmuxOk.ok) throw new Error(`tmux check failed: ${tmuxOk.reason}`);
@@ -277,7 +133,7 @@ async function cmdNew(name: string, opts: { project?: string | false; attach?: b
   createOrAttachTmuxSession({
     sessionId: meta.sessionId,
     sessionDisplayName: meta.name,
-    nodeName: ctx.identity!.nodeName,
+    nodeName: ctx.identity?.nodeName ?? "node",
     ...(projectId ? { projectId } : {}),
     attach: opts.attach !== false,
   });
@@ -285,23 +141,18 @@ async function cmdNew(name: string, opts: { project?: string | false; attach?: b
 
 async function cmdAttach(name: string): Promise<void> {
   const ctx = await loadContext();
-  const meta = await withDaemon(async (client) => {
+  await withDaemon(async (client) => {
     await sendHelloAsCli(client, ctx);
     const r = await client.request({ verb: "LIST" });
     if (r.verb !== "LIST_RESULT") throw new Error("LIST failed");
     const entry = (r as ListResultFrame).sessions.find((s) => s.name === name);
     if (!entry) throw new Error(`unknown session: ${name}`);
-    return entry;
   });
-  const target = tmuxSessionName(meta.address.split("/")[1]!); // not perfect — improve below
-  // Better: just attach by the user-visible name; tmux session name = s-<sessionId>
-  // We need the sessionId — get it from the catalog file directly for correctness.
+  // Resolve sessionId from the catalog and exec tmux attach.
   const sessionsRaw = JSON.parse(await fs.readFile(paths().sessions, "utf8")) as SessionMeta[];
   const fullMeta = sessionsRaw.find((s) => s.name === name);
   if (!fullMeta) throw new Error(`session "${name}" disappeared`);
   attachTmuxSession(tmuxSessionName(fullMeta.sessionId));
-  // unreachable
-  void target;
 }
 
 async function cmdList(opts: { project?: string | false; all?: boolean }): Promise<void> {
@@ -422,17 +273,22 @@ async function cmdRegisterRole(role: string): Promise<void> {
 
 async function cmdDaemon(opts: { foreground?: boolean }): Promise<void> {
   if (!opts.foreground) {
-    process.stderr.write("background daemon mode is not implemented in v0.1; use --foreground\n");
+    process.stderr.write("background daemon mode is not implemented; use --foreground\n");
     process.exit(2);
   }
   await runDaemon({ foreground: true });
 }
 
-function deferredStub(verbName: string): () => never {
-  return () => {
-    process.stderr.write(`\`${verbName}\` is deferred to v0.2 (multi-node mesh)\n`);
-    process.exit(64);
-  };
+async function cmdPickerEntry(): Promise<void> {
+  if (process.env.NAGENT_SESSION) {
+    process.stderr.write(
+      `you're attached to ${process.env.NAGENT_NODE ?? "?"}/${process.env.NAGENT_SESSION}; ` +
+        `Ctrl-B d to detach, \`nagent close\` to destroy\n`,
+    );
+    process.exit(1);
+  }
+  const ctx = await loadContext();
+  await runPicker({ ctx });
 }
 
 // ----- helpers -----
@@ -455,17 +311,15 @@ function tryParseJson(s: string): unknown {
   }
 }
 
-async function cmdPickerEntry(opts: { project?: string | false }): Promise<void> {
-  if (process.env.NAGENT_SESSION) {
-    process.stderr.write(
-      `you're attached to ${process.env.NAGENT_NODE ?? "?"}/${process.env.NAGENT_SESSION}; ` +
-        `Ctrl-B d to detach, \`nagent close\` to destroy\n`,
-    );
-    process.exit(1);
-  }
-  const ctx = await loadContext();
-  const projectId = activeProjectIdFromCtx(ctx, opts);
-  await runPicker({ ctx, projectId, cliOpts: opts });
+/**
+ * Wrap an action with auto-bootstrap. Used by every subcommand except `daemon`,
+ * which manages its own lifecycle.
+ */
+function bootstrapped<A extends unknown[]>(fn: (...args: A) => Promise<void>): (...args: A) => Promise<void> {
+  return async (...args: A) => {
+    await bootstrap();
+    return fn(...args);
+  };
 }
 
 // ----- main -----
@@ -475,52 +329,22 @@ async function main(): Promise<void> {
   program
     .name("nagent")
     .description("agent net — decentralized mesh for cooperating agents (v0.1: single-node)")
-    .version(readPackageVersion())
-    .option("-p, --project <id>", "operate within a specific project")
-    .option("--no-project", "ignore active project context");
+    .version(readPackageVersion());
 
-  program.action(async (opts: { project?: string | false }) => {
-    await cmdPickerEntry(opts);
-  });
-
-  program
-    .command("init")
-    .description("initialize this device as a node")
-    .option("--no-service", "skip service install (default in v0.1)")
-    .option("--force", "overwrite existing identity")
-    .option("--name <name>", "set the node name (defaults to hostname)")
-    .action(async (opts) => {
-      await cmdInit(opts);
-    });
+  program.action(bootstrapped(async () => {
+    await cmdPickerEntry();
+  }));
 
   program
     .command("daemon")
-    .description("run nagentd")
-    .option("--foreground", "run in the foreground (recommended in v0.1)")
-    .action(async (opts) => {
+    .description("run nagentd (use --foreground for log visibility; auto-spawned otherwise)")
+    .option("--foreground", "run in the foreground")
+    .action(async (opts: { foreground?: boolean }) => {
+      // The daemon command must not auto-spawn another daemon.
+      process.env.NAGENT_NO_BOOTSTRAP = "1";
+      await ensureNagentRoot();
       await cmdDaemon(opts);
     });
-
-  const net = program.command("net").description("net commands");
-  net
-    .command("create <name>")
-    .description("create a new net (v0.1: of size 1)")
-    .action(async (name: string) => { await cmdNetCreate(name); });
-  net.command("status").description("show active net").action(async () => { await cmdNetStatus(); });
-  net.command("list").description("list known nets").action(async () => { await cmdNetList(); });
-
-  const project = program.command("project").description("project commands");
-  project
-    .command("init <name>")
-    .option("-d, --description <text>")
-    .description("create a project rooted at cwd (writes .nagent)")
-    .action(async (name: string, opts: { description?: string }) => { await cmdProjectInit(name, opts); });
-  project.command("list").description("list projects in active net").action(async () => { await cmdProjectList(); });
-  project
-    .command("switch <idOrName>")
-    .description("set active project (does not change cwd)")
-    .action(async (x: string) => { await cmdProjectSwitch(x); });
-  project.command("clone <projectId> [path]").description("[deferred] fetch a project from a peer").action(deferredStub("project clone"));
 
   program
     .command("new <name>")
@@ -528,31 +352,33 @@ async function main(): Promise<void> {
     .option("--no-attach", "create but don't attach (useful in scripts)")
     .option("-p, --project <id>", "tag with a specific project")
     .option("--no-project", "do not tag with a project")
-    .action(async (name: string, opts: { attach?: boolean; project?: string | false }) => {
+    .action(bootstrapped(async (name: string, opts: { attach?: boolean; project?: string | false }) => {
       await cmdNew(name, opts);
-    });
+    }));
 
   program
     .command("attach <name>")
     .description("attach to an existing session")
-    .action(async (name: string) => { await cmdAttach(name); });
+    .action(bootstrapped(async (name: string) => { await cmdAttach(name); }));
 
-  program
+  const listCmd = program
     .command("list")
+    .alias("ls")
     .description("list sessions")
     .option("-p, --project <id>", "filter by project")
     .option("-a, --all", "show all projects")
-    .action(async (opts) => { await cmdList(opts); });
+    .action(bootstrapped(async (opts: { project?: string | false; all?: boolean }) => { await cmdList(opts); }));
+  void listCmd;
 
   program
     .command("close [name]")
     .description("close a session (default: current session)")
-    .action(async (name?: string) => { await cmdClose(name); });
+    .action(bootstrapped(async (name?: string) => { await cmdClose(name); }));
 
   program
     .command("send <addr> [payload]")
     .description("send a message on the bus (payload from stdin if omitted)")
-    .action(async (addr: string, payload?: string) => { await cmdSend(addr, payload); });
+    .action(bootstrapped(async (addr: string, payload?: string) => { await cmdSend(addr, payload); }));
 
   program
     .command("recv")
@@ -560,25 +386,12 @@ async function main(): Promise<void> {
     .option("-s, --subscribe <pattern>", "additional address pattern to receive on")
     .option("-t, --timeout <ms>", "stop after N ms")
     .option("-n, --count <n>", "stop after N frames")
-    .action(async (opts) => { await cmdRecv(opts); });
+    .action(bootstrapped(async (opts: { subscribe?: string; timeout?: string; count?: string }) => { await cmdRecv(opts); }));
 
   program
     .command("register-role <role>")
     .description("tag the current session with a role (e.g. agent-alpha)")
-    .action(async (role: string) => { await cmdRegisterRole(role); });
-
-  // Deferred verbs — keep the surface stable.
-  program.command("invite").description("[deferred] issue an invite token").action(deferredStub("invite"));
-  program.command("join <token>").description("[deferred] join a net via invite").action(deferredStub("join"));
-  program.command("web").description("[deferred] start the browser stream").action(deferredStub("web"));
-  program
-    .command("install-service")
-    .description("[deferred] install platform daemon unit")
-    .action(deferredStub("install-service"));
-  program
-    .command("uninstall-service")
-    .description("[deferred] remove platform daemon unit")
-    .action(deferredStub("uninstall-service"));
+    .action(bootstrapped(async (role: string) => { await cmdRegisterRole(role); }));
 
   try {
     await program.parseAsync(process.argv);
