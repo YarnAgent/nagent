@@ -47,8 +47,11 @@ export async function fanoutSessionsAcrossNet(input) {
  * argv-flattening.
  */
 async function sshListLocal(sshHost, remoteArgs, timeoutMs) {
+    // The remote user's login shell is what has nvm/fnm/mise sourced. macOS
+    // defaults to zsh — bash -ilc won't load .zprofile, so nagent isn't on
+    // PATH. Use $SHELL (which sshd sets to the remote user's login shell).
     const innerCmd = ["nagent", ...remoteArgs.map(shellSingleQuote)].join(" ");
-    const wrappedCmd = `bash -ilc ${shellSingleQuote(innerCmd)}`;
+    const wrappedCmd = `"$SHELL" -ilc ${shellSingleQuote(innerCmd)}`;
     return new Promise((resolve, reject) => {
         const args = [
             "-o", "BatchMode=yes",

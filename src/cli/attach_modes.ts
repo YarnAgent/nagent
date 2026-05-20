@@ -30,7 +30,7 @@ export async function attachMosh(sshHost: string, remoteSession: string): Promis
     );
   }
   const innerCmd = `nagent attach ${shellSingleQuote(remoteSession)}`;
-  const remoteCmd = `bash -ilc ${shellSingleQuote(innerCmd)}`;
+  const remoteCmd = `"$SHELL" -ilc ${shellSingleQuote(innerCmd)}`;
   const r = spawnSync("mosh", [sshHost, "--", remoteCmd], { stdio: "inherit" });
   process.exit(r.status ?? 0);
 }
@@ -59,7 +59,7 @@ export async function attachMosh(sshHost: string, remoteSession: string): Promis
 export async function attachLine(sshHost: string, remoteSession: string): Promise<never> {
   const prompt = `[${sshHost.replace(/^nagent\./, "")}:${remoteSession}] $ `;
   const innerCmd = `nagent attach-line ${shellSingleQuote(remoteSession)}`;
-  const remoteCmd = `bash -ilc ${shellSingleQuote(innerCmd)}`;
+  const remoteCmd = `"$SHELL" -ilc ${shellSingleQuote(innerCmd)}`;
 
   // -T: no PTY. We want raw stdio so we can pipe text both directions.
   // -o ServerAliveInterval=30: keep the long-lived SSH session alive.

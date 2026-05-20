@@ -27,7 +27,7 @@ export async function attachMosh(sshHost, remoteSession) {
             "(or use `--line` for a lag-free shell mode without mosh)");
     }
     const innerCmd = `nagent attach ${shellSingleQuote(remoteSession)}`;
-    const remoteCmd = `bash -ilc ${shellSingleQuote(innerCmd)}`;
+    const remoteCmd = `"$SHELL" -ilc ${shellSingleQuote(innerCmd)}`;
     const r = spawnSync("mosh", [sshHost, "--", remoteCmd], { stdio: "inherit" });
     process.exit(r.status ?? 0);
 }
@@ -55,7 +55,7 @@ export async function attachMosh(sshHost, remoteSession) {
 export async function attachLine(sshHost, remoteSession) {
     const prompt = `[${sshHost.replace(/^nagent\./, "")}:${remoteSession}] $ `;
     const innerCmd = `nagent attach-line ${shellSingleQuote(remoteSession)}`;
-    const remoteCmd = `bash -ilc ${shellSingleQuote(innerCmd)}`;
+    const remoteCmd = `"$SHELL" -ilc ${shellSingleQuote(innerCmd)}`;
     // -T: no PTY. We want raw stdio so we can pipe text both directions.
     // -o ServerAliveInterval=30: keep the long-lived SSH session alive.
     const child = spawn("ssh", ["-T", "-o", "ServerAliveInterval=30", "-o", "BatchMode=yes", sshHost, "--", remoteCmd], { stdio: ["pipe", "pipe", "inherit"] });

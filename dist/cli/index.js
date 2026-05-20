@@ -170,7 +170,7 @@ async function attachRemote(peer, sess, opts) {
     }
     // Default mode (v0.2 behavior): ssh -t with PTY, remote runs `nagent attach`.
     const innerCmd = `nagent attach ${shellSingleQuote(sess)}`;
-    const remoteCmd = `bash -ilc ${shellSingleQuote(innerCmd)}`;
+    const remoteCmd = `"$SHELL" -ilc ${shellSingleQuote(innerCmd)}`;
     const { spawnSync } = await import("node:child_process");
     const r = spawnSync("ssh", ["-t", sshHost, "--", remoteCmd], { stdio: "inherit" });
     process.exit(r.status ?? 0);
