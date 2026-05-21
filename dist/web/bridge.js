@@ -65,11 +65,12 @@ export async function openTtydBridge(opts) {
     });
     // Pre-clean any stale sockets.
     await fs.unlink(localSock).catch(() => undefined);
-    // Build the remote command. ttyd 1.7+ accepts --interface unix:<path>.
-    // We use the existing v0.3 cross-shell incantation so nvm/zsh is sourced.
+    // Build the remote command. ttyd 1.7+ binds to a Unix socket when the
+    // --interface arg starts with `/`. We use the existing v0.3 cross-shell
+    // incantation so nvm/zsh is sourced and ttyd / tmux are on PATH.
     const ttydArgs = [
         "ttyd",
-        "--interface", `unix:${remoteSock}`,
+        "--interface", remoteSock,
         writable ? "--writable" : "--readonly",
         "-t", `titleFixed=${sessionName}`,
         "-t", "disableLeaveAlert=true",
@@ -143,9 +144,14 @@ export async function openTtydBridge(opts) {
     });
 }
 /**
- * Poll for a Unix socket to become connectable. ssh's local forwarding
- * creates the socket file before ttyd binds remotely; a connect() succeeds
- * only after ttyd has called listen() on the remote side.
+ * Poll for ttyd-on-the-remote-side to be ready by issuing an actual HTTP
+ * request through the SSH-forwarded local socket.
+ *
+ * NB: a plain `connect()` to the local socket isn't enough — ssh's local
+ * forwarding always accepts new connections (it creates the local socket
+ * before the remote command runs) and only fails the connection LATER, after
+ * the remote tries to dial the upstream socket. We need to actually exchange
+ * bytes to confirm ttyd is up.
  */
 async function waitForUnixSocketReady(socketPath, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
@@ -154,8 +160,33 @@ async function waitForUnixSocketReady(socketPath, timeoutMs) {
         try {
             await new Promise((resolve, reject) => {
                 const c = netConnect(socketPath);
-                c.once("connect", () => { c.end(); resolve(); });
-                c.once("error", (err) => reject(err));
+                let gotResponse = false;
+                const probeTimer = setTimeout(() => {
+                    if (!gotResponse) {
+                        c.destroy();
+                        reject(new Error("probe timeout"));
+                    }
+                }, 1500);
+                c.once("connect", () => {
+                    // Send a minimal HTTP request to ttyd's index path. Any HTTP
+                    // response status means ttyd is alive.
+                    c.write("GET / HTTP/1.0\r\nHost: localhost\r\n\r\n");
+                });
+                c.on("data", (chunk) => {
+                    if (chunk.toString("utf8").includes("HTTP/")) {
+                        gotResponse = true;
+                        clearTimeout(probeTimer);
+                        c.destroy();
+                        resolve();
+                    }
+                });
+                c.once("error", (err) => { clearTimeout(probeTimer); reject(err); });
+                c.once("end", () => {
+                    if (!gotResponse) {
+                        clearTimeout(probeTimer);
+                        reject(new Error("connection ended without HTTP response"));
+                    }
+                });
             });
             return;
         }
@@ -164,7 +195,7 @@ async function waitForUnixSocketReady(socketPath, timeoutMs) {
             await sleep(TTYD_READY_POLL_MS);
         }
     }
-    throw new Error(`socket ${socketPath} not ready in ${timeoutMs}ms (${lastErr?.message ?? "no error"})`);
+    throw new Error(`ttyd not ready on ${socketPath} in ${timeoutMs}ms (${lastErr?.message ?? "no error"})`);
 }
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
