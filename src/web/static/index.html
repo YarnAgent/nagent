@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>nagent-web</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header>
+    <h1>nagent-web</h1>
+    <div id="status">loading…</div>
+  </header>
+  <main>
+    <section id="sessions-panel">
+      <h2>Sessions in net</h2>
+      <ul id="sessions-list"><li class="hint">fetching…</li></ul>
+    </section>
+    <section id="terminal-panel" hidden>
+      <h2 id="terminal-title">terminal</h2>
+      <div id="terminal-container"></div>
+    </section>
+  </main>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
