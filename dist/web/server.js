@@ -82,6 +82,7 @@ export async function runHub(opts) {
                     browserWs,
                     writable: !v.payload.ro,
                     log,
+                    selfNodeName: nodeName,
                 }).catch((err) => {
                     log(`web: bridge failed: ${err.message}`);
                     try {

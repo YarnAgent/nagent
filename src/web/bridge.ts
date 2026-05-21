@@ -22,6 +22,13 @@ export interface BridgeOptions {
   writable: boolean;
   /** log channel (forwarded from the hub) */
   log: (line: string) => void;
+  /**
+   * When the requested peerNode equals the hub's own node name, skip the
+   * ssh hop and spawn ttyd directly. This keeps "hub serves its own
+   * sessions" working without requiring a `Host nagent.<self>` ssh_config
+   * entry (which we don't write).
+   */
+  selfNodeName: string;
 }
 
 interface BridgeState {
@@ -55,11 +62,17 @@ const TTYD_READY_TIMEOUT_MS = 5_000;
  * when its ssh parent exits, so cleanup is "kill the ssh child."
  */
 export async function openTtydBridge(opts: BridgeOptions): Promise<void> {
-  const { peerNode, sessionName, browserWs, writable, log } = opts;
+  const { peerNode, sessionName, browserWs, writable, log, selfNodeName } = opts;
   const state: BridgeState = { closed: false, earlyBuffer: [] };
   const bridgeId = randomBytes(6).toString("hex");
-  const localSock = join(tmpdir(), `nagent-hub-${bridgeId}.sock`);
-  const remoteSock = `/tmp/nagent-ttyd-${bridgeId}.sock`;
+  const isSelfHosted = peerNode === selfNodeName;
+  // When we're bridging to a session on the hub's own node, we don't need
+  // ssh-Unix-socket-forwarding — ttyd binds to a local socket and we
+  // connect to it directly. Otherwise the hub opens an ssh tunnel.
+  const localSock = isSelfHosted
+    ? join(tmpdir(), `nagent-hub-self-${bridgeId}.sock`)
+    : join(tmpdir(), `nagent-hub-${bridgeId}.sock`);
+  const remoteSock = isSelfHosted ? localSock : `/tmp/nagent-ttyd-${bridgeId}.sock`;
   state.localSock = localSock;
 
   const closeAll = (reason: string): void => {
@@ -137,19 +150,40 @@ export async function openTtydBridge(opts: BridgeOptions): Promise<void> {
     "--",
     wrappedCmd,
   ];
-  log(`web/bridge[${bridgeId}]: ssh ${sshArgs.join(" ")}`);
-  const ssh = spawn("ssh", sshArgs, { stdio: ["ignore", "pipe", "pipe"] });
-  state.ssh = ssh;
-  ssh.stdout?.on("data", (d) => log(`web/bridge[${bridgeId}] ttyd: ${String(d).trim()}`));
-  ssh.stderr?.on("data", (d) => log(`web/bridge[${bridgeId}] ssh: ${String(d).trim()}`));
-  ssh.on("error", (err) => {
-    log(`web/bridge[${bridgeId}]: ssh spawn error: ${err.message}`);
-    closeAll("ssh spawn error");
-  });
-  ssh.on("close", (code) => {
-    log(`web/bridge[${bridgeId}]: ssh exited (code ${code})`);
-    closeAll(`ssh exited ${code}`);
-  });
+  if (isSelfHosted) {
+    log(`web/bridge[${bridgeId}]: self-hosted (peerNode == selfNodeName), spawning ttyd locally`);
+    // Run ttyd through a login shell so nvm-managed nagent is on PATH.
+    const child = spawn(
+      process.env.SHELL || "/bin/bash",
+      ["-ilc", `rm -f ${shellSingleQuote(localSock)}; ${remoteCmd}`],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    state.ssh = child; // reuse the same field for cleanup
+    child.stdout?.on("data", (d) => log(`web/bridge[${bridgeId}] ttyd: ${String(d).trim()}`));
+    child.stderr?.on("data", (d) => log(`web/bridge[${bridgeId}] ttyd-stderr: ${String(d).trim()}`));
+    child.on("error", (err) => {
+      log(`web/bridge[${bridgeId}]: ttyd spawn error: ${err.message}`);
+      closeAll("ttyd spawn error");
+    });
+    child.on("close", (code) => {
+      log(`web/bridge[${bridgeId}]: ttyd exited (code ${code})`);
+      closeAll(`ttyd exited ${code}`);
+    });
+  } else {
+    log(`web/bridge[${bridgeId}]: ssh ${sshArgs.join(" ")}`);
+    const ssh = spawn("ssh", sshArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    state.ssh = ssh;
+    ssh.stdout?.on("data", (d) => log(`web/bridge[${bridgeId}] ttyd: ${String(d).trim()}`));
+    ssh.stderr?.on("data", (d) => log(`web/bridge[${bridgeId}] ssh: ${String(d).trim()}`));
+    ssh.on("error", (err) => {
+      log(`web/bridge[${bridgeId}]: ssh spawn error: ${err.message}`);
+      closeAll("ssh spawn error");
+    });
+    ssh.on("close", (code) => {
+      log(`web/bridge[${bridgeId}]: ssh exited (code ${code})`);
+      closeAll(`ssh exited ${code}`);
+    });
+  }
 
   try {
     await waitForUnixSocketReady(localSock, TTYD_READY_TIMEOUT_MS);

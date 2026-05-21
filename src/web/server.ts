@@ -106,6 +106,7 @@ export async function runHub(opts: HubOptions): Promise<RunningHub> {
           browserWs,
           writable: !v.payload.ro,
           log,
+          selfNodeName: nodeName,
         }).catch((err) => {
           log(`web: bridge failed: ${(err as Error).message}`);
           try { browserWs.close(1011, "bridge failed"); } catch { /* ignore */ }
