@@ -30,7 +30,7 @@ const TTYD_READY_TIMEOUT_MS = 5_000;
  */
 export async function openTtydBridge(opts) {
     const { peerNode, sessionName, browserWs, writable, log } = opts;
-    const state = { closed: false };
+    const state = { closed: false, earlyBuffer: [] };
     const bridgeId = randomBytes(6).toString("hex");
     const localSock = join(tmpdir(), `nagent-hub-${bridgeId}.sock`);
     const remoteSock = `/tmp/nagent-ttyd-${bridgeId}.sock`;
@@ -62,6 +62,18 @@ export async function openTtydBridge(opts) {
     browserWs.on("error", (err) => {
         log(`web/bridge[${bridgeId}]: browser error: ${err.message}`);
         closeAll("browser error");
+    });
+    // Attach the browser → upstream forwarder BEFORE we start the ssh + ttyd
+    // dance, so messages the browser sends in the ~few-hundred-ms window
+    // before upstream is up don't get dropped. Buffer them until upstream is
+    // open.
+    browserWs.on("message", (data, isBinary) => {
+        if (state.upstream && state.upstream.readyState === state.upstream.OPEN) {
+            state.upstream.send(data, { binary: isBinary });
+        }
+        else {
+            state.earlyBuffer.push({ data: data, isBinary });
+        }
     });
     // Pre-clean any stale sockets.
     await fs.unlink(localSock).catch(() => undefined);
@@ -132,9 +144,13 @@ export async function openTtydBridge(opts) {
     });
     state.upstream = upstream;
     upstream.on("open", () => {
-        log(`web/bridge[${bridgeId}]: upstream open`);
-        // ttyd expects a JSON_DATA initial message with column/row info; xterm.js
-        // sends one as soon as it attaches. We pass it through verbatim.
+        log(`web/bridge[${bridgeId}]: upstream open (buffered=${state.earlyBuffer.length})`);
+        // Drain any browser → upstream messages that arrived while ssh + ttyd
+        // were still spinning up.
+        for (const m of state.earlyBuffer) {
+            upstream.send(m.data, { binary: m.isBinary });
+        }
+        state.earlyBuffer = [];
     });
     upstream.on("message", (data, isBinary) => {
         if (browserWs.readyState !== browserWs.OPEN)
@@ -148,11 +164,6 @@ export async function openTtydBridge(opts) {
     upstream.on("error", (err) => {
         log(`web/bridge[${bridgeId}]: upstream error: ${err.message}`);
         closeAll("upstream error");
-    });
-    browserWs.on("message", (data, isBinary) => {
-        if (upstream.readyState !== upstream.OPEN)
-            return;
-        upstream.send(data, { binary: isBinary });
     });
 }
 /**
