@@ -87,15 +87,17 @@ export async function openTtydBridge(opts: BridgeOptions): Promise<void> {
   await fs.unlink(localSock).catch(() => undefined);
 
   // Build the remote command. ttyd 1.7+ binds to a Unix socket when the
-  // --interface arg starts with `/`. We use the existing v0.3 cross-shell
-  // incantation so nvm/zsh is sourced and ttyd / tmux are on PATH.
+  // --interface arg starts with `/`. The spawned program is `nagent attach
+  // <sessionName>` rather than `tmux attach -t <sessionName>` so the daemon's
+  // session-name-to-sessionId lookup gets used (tmux sessions are stored
+  // under the prefixed name `s-<sessionId>`, not the human name).
   const ttydArgs = [
     "ttyd",
     "--interface", remoteSock,
     writable ? "--writable" : "--readonly",
     "-t", `titleFixed=${sessionName}`,
     "-t", "disableLeaveAlert=true",
-    "--", "tmux", "-L", "nagent", "attach", "-t", sessionName,
+    "--", "nagent", "attach", sessionName,
   ];
   const remoteCmd = ttydArgs.map(shellSingleQuote).join(" ");
   const innerCmd = `rm -f ${shellSingleQuote(remoteSock)}; ${remoteCmd}`;
