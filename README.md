@@ -103,6 +103,51 @@ echo '{"q":"status?"}' | NAGENT_SESSION=alpha NAGENT_NODE=$(hostname) \
 - The dedicated tmux socket is `tmux -L nagent` — your own `tmux ls` and `nagent list` never collide.
 - The auto-spawned daemon logs to `~/.nagent/daemon.log` and writes its pid to `~/.nagent/daemon.pid`. Set `NAGENT_NO_BOOTSTRAP=1` to bypass auto-bootstrap (used by tests).
 
+## Three-node verification (v0.3, in progress on `feat/v0.3-mesh-and-latency`)
+
+The v0.3 branch adds three things on top of v0.2:
+
+1. **Mesh trust** — after a join, the issuer fans out `gossip-add-peer` to every existing peer so the new joiner ends up in everyone's `authorized_keys`. Any node can SSH-attach to any other without re-inviting.
+2. **Net-wide list** — `nagent list` fans out to every peer (cap 16 parallel, 3 s timeout each) and merges the results. `(unreachable)` rows flag peers that didn't answer. `--local` keeps the v0.2 single-node shape.
+3. **Low-lag attach** — `nagent attach <peer>/<session> --line` runs a local readline; keystrokes never round-trip, output streams back via `tmux pipe-pane`. `--mosh` is also available when both ends have mosh installed.
+
+### Install the v0.3 branch on a fresh device
+
+```sh
+# Linux / macOS, Node ≥22, tmux ≥3.0, OpenSSH client.
+npm install -g https://codeload.github.com/YarnAgent/nagent/tar.gz/feat/v0.3-mesh-and-latency
+nagent --version          # 0.1.0-alpha.1
+```
+
+(Use the same codeload-tarball URL form rather than the `github:` shorthand to avoid a known npm git-dep symlink bug.)
+
+### Reproducing the end-to-end test
+
+On node **A** (already in a net, with at least one session running):
+
+```sh
+nagent                              # picker
+> /invite --expires 1h              # copy the token; one-shot per device
+> q
+```
+
+On node **B** (fresh device after the install above):
+
+```sh
+nagent join <token>                 # mesh trust gets wired automatically
+nagent list                         # should show A's sessions + your own
+nagent attach A/<sess> --line       # type, see no lag, exit with Ctrl-D
+```
+
+On node **C** (another fresh device, joined the same way):
+
+```sh
+nagent attach B/<sess>              # direct C→B works without going via A
+                                    # (gossip wired authorized_keys both ways)
+```
+
+That last attach is the headline acceptance test for v0.3 mesh trust: **any node can attach to any session, regardless of which peer issued the invite.**
+
 ## Two-node verification (v0.2)
 
 On the **issuer** (already running nagent, has a session you want to share):

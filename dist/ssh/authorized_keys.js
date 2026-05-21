@@ -4,6 +4,9 @@ import { homedir } from "node:os";
 const FENCE_OPEN = "# >>> nagent managed (do not edit) >>>";
 const FENCE_CLOSE = "# <<< nagent managed <<<";
 export function authorizedKeysPath() {
+    const override = process.env.NAGENT_AUTHORIZED_KEYS_PATH;
+    if (override && override.length > 0)
+        return override;
     return join(homedir(), ".ssh", "authorized_keys");
 }
 function parse(content) {

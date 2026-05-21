@@ -8,6 +8,7 @@ import { appendAuthorizedKey, removeAuthorizedKey, } from "../ssh/authorized_key
 import { loadSshKeypair, opensshEd25519Pem, sshAuthorizedKeysLine, } from "../ssh/identity.js";
 import { ensureUserSshConfigInclude, writeHostEntry, } from "../ssh/ssh_config.js";
 import { currentReachableAddresses } from "../ssh/addresses.js";
+import { buildGossipAdd, runWithConcurrency, sendGossipAdd, signGossipAdd, } from "../gossip/index.js";
 import { readActiveState, readIdentity, readInvites, readNetMeta, readPeers, writeActiveState, writeInvites, writeNetMeta, writePeers, } from "../store/index.js";
 import { writeJson, readJson } from "../store/json.js";
 import { paths } from "../platform/paths.js";
@@ -237,7 +238,64 @@ export async function cmdJoinRespond(inviteId) {
         issuerSshUser: userInfo().username,
         issuerAddrs,
     };
-    process.stdout.write(JSON.stringify(accepted) + "\n");
+    // v0.3: wire the joiner into the issuer's own ssh_config so the issuer can
+    // SSH out to the joiner (for future gossip fanouts and `attach`). Also wire
+    // any existing peers we haven't entered before (heal forward).
+    await ensureUserSshConfigInclude();
+    for (const p of finalPeers) {
+        if (p.nodeName === identity.nodeName)
+            continue;
+        await wireHostEntryForPeer(p);
+    }
+    // Flush JOIN_ACCEPTED to the joiner BEFORE the gossip fanout runs. If we
+    // ran fanout first, a single slow peer would delay (or worst-case lose) the
+    // joiner's response — the joiner could time out the ssh while the issuer
+    // had already committed `state: "redeemed"`, leaving the joiner unable to
+    // retry. See issue #3 (H1). Write with a flush callback, then kick off the
+    // fanout off the main path with a hard wall-clock budget.
+    await new Promise((resolve) => {
+        process.stdout.write(JSON.stringify(accepted) + "\n", () => resolve());
+    });
+    // v0.3: fan out gossip-add-peer to existing peers (excluding issuer and
+    // joiner) so any-to-any mesh trust is established. Best-effort — failures
+    // are captured for a future heal pass, not surfaced to the joiner. We cap
+    // total wall-clock at 12 s so a constrained-ssh session can't dangle.
+    const targets = finalPeers.filter((p) => p.nodeName !== identity.nodeName && p.nodeName !== redeem.joinerNode);
+    if (targets.length > 0) {
+        const payload = buildGossipAdd({
+            netId: netMeta.netId,
+            callerPub: keypair.rawPub.toString("base64url"),
+            callerNode: identity.nodeName,
+            newPeer: joinerPeer,
+        });
+        const signed = signGossipAdd(payload, keypair.rawPriv, keypair.rawPub);
+        const fanout = runWithConcurrency(targets, 8, async (p) => {
+            try {
+                await sendGossipAdd(`nagent.${p.nodeName}`, signed, { timeoutMs: 6000 });
+            }
+            catch {
+                // Best-effort: a heal pass on next daemon start will retry. The
+                // join itself succeeded regardless.
+            }
+        });
+        await Promise.race([
+            fanout,
+            new Promise((resolve) => setTimeout(resolve, 12000)),
+        ]);
+    }
+}
+async function wireHostEntryForPeer(p) {
+    const first = p.addresses[0];
+    if (!first)
+        return;
+    const [host, portStr] = splitHostPort(first);
+    await writeHostEntry({
+        peerName: p.nodeName,
+        host,
+        ...(portStr ? { port: Number.parseInt(portStr, 10) } : {}),
+        user: p.sshUser ?? userInfo().username,
+        identityFile: paths().sshKey,
+    });
 }
 async function rejectAndExit(message) {
     const r = { v: 1, error: message };
