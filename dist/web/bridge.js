@@ -76,6 +76,7 @@ export async function openTtydBridge(opts) {
         writable ? "--writable" : "--readonly",
         "-t", `titleFixed=${sessionName}`,
         "-t", "disableLeaveAlert=true",
+        "--debug=4",
         "--", "nagent", "attach", sessionName,
     ];
     const remoteCmd = ttydArgs.map(shellSingleQuote).join(" ");
