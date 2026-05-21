@@ -78,12 +78,15 @@ export function buildGossipAdd(args) {
 export async function sendGossipAdd(sshHost, signed, opts = {}) {
     const timeoutMs = opts.timeoutMs ?? 8000;
     return new Promise((resolve, reject) => {
+        // Wrap in `"$SHELL" -ilc` so nvm / fnm / mise get sourced and nagent is on
+        // PATH. macOS sshd doesn't source .zprofile for non-interactive commands,
+        // and the user's login shell may be zsh (so `bash -ilc` won't help either).
         const args = [
             "-o", "BatchMode=yes",
             "-o", `ConnectTimeout=${Math.ceil(timeoutMs / 1000)}`,
             sshHost,
             "--",
-            "nagent", "gossip-add-peer",
+            `"$SHELL" -ilc 'nagent gossip-add-peer'`,
         ];
         const child = spawn("ssh", args, { stdio: ["pipe", "pipe", "pipe"] });
         const outChunks = [];
