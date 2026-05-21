@@ -21,6 +21,8 @@ main { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 49p
 #sessions-list li.unreachable { color: var(--muted); cursor: not-allowed; }
 #sessions-list li.hint { color: var(--muted); cursor: default; }
 #sessions-list li .node { color: var(--muted); }
-#terminal-panel { padding: 0.5rem; display: flex; flex-direction: column; }
+#terminal-panel { padding: 0.5rem; display: flex; flex-direction: column; min-width: 0; }
 #terminal-title { font-size: 0.85rem; color: var(--muted); margin: 0 0 0.5rem; font-weight: 400; }
-#terminal-container { flex: 1; min-height: 0; }
+#terminal-container { flex: 1; min-height: 0; min-width: 0; }
+#terminal-container .xterm { height: 100%; }
+#terminal-container .xterm-viewport { background: transparent !important; }

@@ -4,8 +4,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, normalize } from "node:path";
 import { hostname } from "node:os";
+import { WebSocketServer } from "ws";
 import { loadOrGenerateHubCert } from "./cert.js";
-import { loadOrGenerateWebConfig } from "./token.js";
+import { loadOrGenerateWebConfig, mintToken, verifyToken } from "./token.js";
+import { openTtydBridge } from "./bridge.js";
 import { paths } from "../platform/paths.js";
 import { readActiveState, readIdentity, readPeers } from "../store/index.js";
 import { fanoutSessionsAcrossNet } from "../cli/list_net.js";
@@ -33,10 +35,9 @@ export async function runHub(opts) {
     const cert = await loadOrGenerateHubCert([nodeName, ...reachable]);
     log(`web: cert ready (fingerprint ${cert.fingerprint})`);
     const config = await loadOrGenerateWebConfig();
-    void config; // used later by token + ws bridge
     const server = createHttpsServer({ cert: cert.cert, key: cert.key }, async (req, res) => {
         try {
-            await routeHttp(req, res, { nodeName, cert });
+            await routeHttp(req, res, { nodeName, cert, hmacSecret: config.hmacSecret });
         }
         catch (err) {
             log(`web: handler error: ${err.message}`);
@@ -44,6 +45,55 @@ export async function runHub(opts) {
                 res.writeHead(500, { "content-type": "text/plain" });
             }
             res.end("internal error");
+        }
+    });
+    // WebSocket: /ws/<node>/<session>?t=<token>
+    const wss = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (req, socket, head) => {
+        try {
+            const url = new URL(req.url ?? "/", "https://localhost");
+            const m = url.pathname.match(/^\/ws\/([^/]+)\/([^/]+)$/);
+            if (!m) {
+                socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+                socket.destroy();
+                return;
+            }
+            const urlNode = decodeURIComponent(m[1]);
+            const urlSession = decodeURIComponent(m[2]);
+            const token = url.searchParams.get("t") ?? "";
+            const v = verifyToken(token, config.hmacSecret);
+            if (!v.ok) {
+                log(`web: ws ${urlNode}/${urlSession} rejected: ${v.error}`);
+                socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+                socket.destroy();
+                return;
+            }
+            if (v.payload.node !== urlNode || v.payload.session !== urlSession) {
+                log(`web: ws token scope mismatch: token=${v.payload.node}/${v.payload.session} url=${urlNode}/${urlSession}`);
+                socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+                socket.destroy();
+                return;
+            }
+            wss.handleUpgrade(req, socket, head, (browserWs) => {
+                log(`web: ws upgraded for ${urlNode}/${urlSession} (ro=${v.payload.ro})`);
+                void openTtydBridge({
+                    peerNode: urlNode,
+                    sessionName: urlSession,
+                    browserWs,
+                    writable: !v.payload.ro,
+                    log,
+                }).catch((err) => {
+                    log(`web: bridge failed: ${err.message}`);
+                    try {
+                        browserWs.close(1011, "bridge failed");
+                    }
+                    catch { /* ignore */ }
+                });
+            });
+        }
+        catch (err) {
+            log(`web: upgrade error: ${err.message}`);
+            socket.destroy();
         }
     });
     await new Promise((resolve, reject) => {
@@ -72,7 +122,10 @@ export async function runHub(opts) {
 async function routeHttp(req, res, ctx) {
     const url = new URL(req.url ?? "/", `https://localhost`);
     const pathname = url.pathname;
-    if (pathname === "/" || pathname === "/index.html") {
+    if (pathname === "/" || pathname === "/index.html" || pathname.startsWith("/s/")) {
+        // /s/<node>/<name> is a "session page" — same SPA, picker scrolls to that
+        // session via the URL hash. For v0.4 first cut we just serve index.html;
+        // the SPA can read location.pathname itself if it wants deep-linking.
         await serveStatic(res, "index.html", "text/html; charset=utf-8");
         return;
     }
@@ -102,8 +155,57 @@ async function routeHttp(req, res, ctx) {
         res.end(JSON.stringify({ v: 1, sessions }));
         return;
     }
+    if (pathname === "/api/token" && req.method === "POST") {
+        await handleMintToken(req, res, ctx);
+        return;
+    }
     res.writeHead(404, { "content-type": "text/plain" });
     res.end("not found");
+}
+const SPA_TOKEN_TTL_MS = 60 * 60 * 1000; // 1h
+const MAX_TOKEN_BODY = 1024;
+async function handleMintToken(req, res, ctx) {
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        total += chunk.length;
+        if (total > MAX_TOKEN_BODY) {
+            res.writeHead(413, { "content-type": "text/plain" });
+            res.end("body too large");
+            return;
+        }
+    }
+    let body;
+    try {
+        body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    }
+    catch {
+        res.writeHead(400, { "content-type": "text/plain" });
+        res.end("bad json");
+        return;
+    }
+    const node = typeof body.node === "string" ? body.node : "";
+    const session = typeof body.session === "string" ? body.session : "";
+    if (!node || !session) {
+        res.writeHead(400, { "content-type": "text/plain" });
+        res.end("node + session required");
+        return;
+    }
+    // For the SPA's session list, the requested (node, session) must appear in
+    // the discoverable set — otherwise this would amount to a "mint any token
+    // for any string" endpoint open to anyone who can hit the hub.
+    const sessions = await collectNetSessions(ctx.nodeName);
+    const allowed = sessions.some((s) => !("unreachable" in s) && s.node === node && s.session.name === session);
+    if (!allowed) {
+        res.writeHead(404, { "content-type": "text/plain" });
+        res.end("not in discoverable sessions");
+        return;
+    }
+    const now = Date.now();
+    const token = mintToken({ node, session, iat: now, exp: now + SPA_TOKEN_TTL_MS, ro: !!body.readonly }, ctx.hmacSecret);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ v: 1, token, expiresAt: new Date(now + SPA_TOKEN_TTL_MS).toISOString() }));
 }
 async function collectNetSessions(selfNodeName) {
     // Pull local sessions through the daemon's LIST RPC.
