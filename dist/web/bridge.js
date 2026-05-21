@@ -82,12 +82,11 @@ export async function openTtydBridge(opts) {
     // <sessionName>` rather than `tmux attach -t <sessionName>` so the daemon's
     // session-name-to-sessionId lookup gets used (tmux sessions are stored
     // under the prefixed name `s-<sessionId>`, not the human name).
-    // TEMP DEBUG: trivial echo + sleep child to validate the bridge plumbing
-    // independent of nagent attach. If this works in the browser, the bug is
-    // in nagent-attach-under-ttyd; if not, it's in the bridge itself.
-    const childCmd = `echo "[NAGENT-WEB-BRIDGE-CHILD-STARTED ${sessionName}]"; ` +
-        `for i in 1 2 3 4 5; do echo "tick $i $(date)"; sleep 1; done; ` +
-        `echo "[child done]"`;
+    // Wrap the spawn in a login shell so nvm/asdf-managed nagent is on PATH,
+    // and capture stderr + exit code so any failure surfaces in the browser
+    // rather than ttyd just closing on EOF.
+    const childCmd = `exec "$SHELL" -ilc ${shellSingleQuote(`nagent attach ${shellSingleQuote(sessionName)} 2>&1 ; ` +
+        `printf '\\r\\n[nagent attach exited %s]\\r\\n' $?; sleep 2`)}`;
     const ttydArgs = [
         "ttyd",
         "--interface", remoteSock,
