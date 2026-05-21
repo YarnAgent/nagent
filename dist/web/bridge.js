@@ -70,16 +70,24 @@ export async function openTtydBridge(opts) {
     // <sessionName>` rather than `tmux attach -t <sessionName>` so the daemon's
     // session-name-to-sessionId lookup gets used (tmux sessions are stored
     // under the prefixed name `s-<sessionId>`, not the human name).
+    // Wrap the child in a shell so (a) we get nvm/asdf-sourced PATH for nagent,
+    // and (b) on failure we surface stderr + exit code rather than ttyd just
+    // closing silently on EOF.
+    const childCmd = `exec "$SHELL" -ilc ${shellSingleQuote(`nagent attach ${shellSingleQuote(sessionName)} 2>&1 ; ` +
+        `printf '\\n[nagent attach exited %s]\\n' $?; sleep 2`)}`;
     const ttydArgs = [
         "ttyd",
         "--interface", remoteSock,
         writable ? "--writable" : "--readonly",
         "-t", `titleFixed=${sessionName}`,
         "-t", "disableLeaveAlert=true",
-        "--debug=4",
-        "--", "nagent", "attach", sessionName,
+        "--", "sh", "-c", childCmd,
     ];
     const remoteCmd = ttydArgs.map(shellSingleQuote).join(" ");
+    // Run ttyd via the user's login shell so ~/.local/bin and nvm-managed
+    // bins are on PATH. The child of ttyd is `sh -c <childCmd>` which itself
+    // re-launches the login shell — necessary because ttyd execs argv
+    // directly, ignoring inherited PATH-modifying shell files.
     const innerCmd = `rm -f ${shellSingleQuote(remoteSock)}; ${remoteCmd}`;
     const wrappedCmd = `"$SHELL" -ilc ${shellSingleQuote(innerCmd)}`;
     const sshArgs = [
