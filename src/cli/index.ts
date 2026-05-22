@@ -34,6 +34,18 @@ import { cmdGossipAddPeer } from "./gossip.js";
 import { attachLine, attachMosh } from "./attach_modes.js";
 import { cmdAttachLineServer } from "./attach_line_server.js";
 import { cmdWebServe, cmdWebStop, cmdWebToken, cmdWebTrust } from "./web.js";
+import {
+  cmdRelayServe,
+  cmdRelayStop,
+  cmdRelayAdd,
+  cmdRelayRemove,
+  cmdRelayList,
+  cmdRelayGrant,
+  cmdRelayRevoke,
+  cmdRelayListAllowed,
+  cmdRelayDial,
+} from "./relay.js";
+import { cmdPathStatus, cmdPathProbe } from "./path.js";
 import { shellSingleQuote } from "../lib/shell.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -149,6 +161,8 @@ async function cmdNew(name: string, opts: { project?: string | false; attach?: b
 interface AttachOpts {
   line?: boolean;
   mosh?: boolean;
+  /** v0.5: 'auto' | 'direct' | '<relay-name>' — overrides path-table selection. */
+  via?: string;
 }
 
 async function cmdAttach(name: string, opts: AttachOpts): Promise<void> {
@@ -488,6 +502,7 @@ async function main(): Promise<void> {
     .description("attach to an existing session (local NAME or <peer>/<session>)")
     .option("--line", "[v0.3] line-buffered shell — no per-keystroke RTT, no TUI support")
     .option("--mosh", "[v0.3] use mosh transport — predictive local echo (requires mosh on both ends)")
+    .option("--via <name>", "[v0.5] force transport: 'auto' (default), 'direct', or a pinned relay name")
     .action(bootstrapped(async (name: string, opts: AttachOpts) => { await cmdAttach(name, opts); }));
 
   // Internal — server side of `attach … --line`. Reads command lines from
@@ -564,6 +579,99 @@ async function main(): Promise<void> {
     .action(bootstrapped(async (hubUrl: string, opts: { yes?: boolean }) => {
       await cmdWebTrust({ hubUrl, ...(opts.yes ? { yes: true } : {}) });
     }));
+
+  // ---------------- v0.5: nagent relay … ----------------
+  const relayCmd = program
+    .command("relay")
+    .description("[v0.5] dumb-pipe TCP rendezvous; lets non-tailnet peers reach each other via a public-IP box");
+
+  relayCmd
+    .command("serve")
+    .description("run the relay daemon on this box (TLS, self-signed cert pinned by clients)")
+    .option("--port <port>", "TCP port to listen on (default 8443; 0 = random)")
+    .option("--bind <addr>", "bind address (default 0.0.0.0)")
+    .option("--name <name>", "human-friendly relay name (default: this node's nodeName or hostname)")
+    .action(async (opts: { port?: string; bind?: string; name?: string }) => {
+      process.env.NAGENT_NO_BOOTSTRAP = "1"; // relay doesn't need the mesh identity to exist
+      await cmdRelayServe(opts);
+    });
+
+  relayCmd
+    .command("stop")
+    .description("stop the relay daemon running on this box")
+    .action(async () => { await cmdRelayStop(); });
+
+  relayCmd
+    .command("add <url>")
+    .description("pin a relay URL — fetches + prompts for fingerprint, then stores it locally")
+    .option("--name <name>", "store under this name (default: relay URL's host)")
+    .option("-y, --yes", "skip the confirmation prompt")
+    .action(async (url: string, opts: { name?: string; yes?: boolean }) => {
+      await cmdRelayAdd(url, opts);
+    });
+
+  relayCmd
+    .command("remove <name>")
+    .description("unpin a previously-added relay")
+    .action(async (name: string) => { await cmdRelayRemove(name); });
+
+  relayCmd
+    .command("list")
+    .description("list pinned relays (name, URL, fingerprint, when pinned)")
+    .action(async () => { await cmdRelayList(); });
+
+  relayCmd
+    .command("grant <node> <pubKey>")
+    .description("(on a relay) add an explicit allowlist entry — alternative to mesh peers.json")
+    .action(async (node: string, pubKey: string) => {
+      process.env.NAGENT_NO_BOOTSTRAP = "1";
+      await cmdRelayGrant(node, pubKey);
+    });
+
+  relayCmd
+    .command("revoke <node>")
+    .description("(on a relay) remove an explicit allowlist entry")
+    .action(async (node: string) => {
+      process.env.NAGENT_NO_BOOTSTRAP = "1";
+      await cmdRelayRevoke(node);
+    });
+
+  relayCmd
+    .command("list-allowed")
+    .description("(on a relay) print the explicit allowlist (does NOT include mesh peers.json)")
+    .action(async () => {
+      process.env.NAGENT_NO_BOOTSTRAP = "1";
+      await cmdRelayListAllowed();
+    });
+
+  // Hidden — used as ssh's ProxyCommand on the client side.
+  const relayDialCmd = program
+    .command("relay-dial <peer>")
+    .description("(ProxyCommand helper) stdio bridge to <peer> via a pinned relay")
+    .requiredOption("--relay <name>", "name of the pinned relay to use")
+    .action(async (peer: string, opts: { relay: string }) => {
+      process.env.NAGENT_NO_BOOTSTRAP = "1";
+      await cmdRelayDial(peer, opts);
+    });
+  (relayDialCmd as unknown as { _hidden: boolean })._hidden = true;
+
+  // ---------------- v0.5: nagent path … ----------------
+  const pathCmd = program
+    .command("path")
+    .description("[v0.5] inspect or refresh the latency-aware path-table");
+
+  pathCmd
+    .command("status [peer]")
+    .description("show the path-table; optionally focus on a single peer")
+    .option("--json", "machine-readable JSON output")
+    .action(bootstrapped(async (peer: string | undefined, opts: { json?: boolean }) => {
+      await cmdPathStatus({ ...(peer ? { peer } : {}), ...(opts.json ? { json: true } : {}) });
+    }));
+
+  pathCmd
+    .command("probe")
+    .description("run a one-shot direct probe round; relay STATUS pulls require the daemon")
+    .action(bootstrapped(async () => { await cmdPathProbe(); }));
 
   // Internal — only invoked via SSH `command=` restriction during a join.
   // Marked hidden so it doesn't appear in --help noise.
