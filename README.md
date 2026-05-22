@@ -3,6 +3,8 @@
 > Agent net — a decentralized mesh CLI for cooperating agents across nodes.
 >
 > **Current release: [v0.3.1](https://github.com/YarnAgent/nagent/releases/tag/v0.3.1)** — mesh peer trust, net-wide `list`, low-lag `attach --line`. See [CHANGELOG via tags](https://github.com/YarnAgent/nagent/releases) for milestone history.
+>
+> **Unreleased — in flight on `feat/v0.5-relay`:** `nagent relay serve` (dumb-pipe TCP rendezvous), `nagent relay add/grant` (cert pinning + allowlist), `nagent attach --via <auto|direct|relay>`, latency-aware path selection with 10 ms hysteresis. Makes Tailscale optional. See [ADR-0003](docs/architecture/adr/0003-v0.5-nagent-relay.md).
 
 ## What it does
 
@@ -156,11 +158,51 @@ git config core.hooksPath .githooks
 
 | Tag | What shipped |
 |---|---|
+| **v0.5** (in flight) | `nagent relay serve` — dumb-pipe TCP rendezvous on TLS:8443 with self-signed cert pinning; latency-aware `chooseTransport` w/ 10 ms hysteresis (Tailscale-style); `--via auto\|direct\|<relay>` flag on attach; ssh ProxyCommand wired at every SSH spawn site. Tailscale becomes **optional**. ([ADR-0003](docs/architecture/adr/0003-v0.5-nagent-relay.md)) |
+| **v0.4** (in flight) | `nagent web serve` + xterm.js SPA — browser access to mesh sessions via SSH-tunneled ttyd. Default browser input is Line mode (single-line buffered shell, zero per-keystroke RTT). ([ADR-0002](docs/architecture/adr/0002-v0.4-web-hub.md)) |
 | **v0.3.1** | Fix: cross-node gossip ssh now wraps in `"$SHELL" -ilc` for macOS zsh compatibility. |
 | **v0.3.0** | Mesh peer trust via gossip (any-to-any attach without re-inviting); net-wide `list` via SSH fanout; low-lag `attach --line` (local readline + remote `tmux send-keys`) and `--mosh`. |
 | **v0.2** (pre-tag, in `main`) | Hub-and-spoke multi-node: `nagent join <token>`, `nagent attach <peer>/<session>` via plain SSH; cross-device install via `scripts/install.sh`. |
 | **v0.1** (pre-tag) | Single-node baseline: tmux session management, local bus (`send` / `recv` / `subscribe`), project marker, picker REPL. |
 
-Deferred to **v0.4**: per-peer `command=` SSH router (constrains peer access to a known set of nagent subcommands), `callerPub`-to-`$SSH_USER_AUTH_INFO_0` binding for gossip, daemon-startup heal pass, `/web` browser stream, cross-node bus over persistent peer SSH tunnels (`bus-pipe`), `/install-service` for platform daemon units.
+## Routing (v0.5 preview)
+
+`nagent attach` now picks the best transport per peer using a node-local path-table:
+
+```
+client                                 relay (any sshd-less box w/ public IP)        target
+  │  long-lived TLS:8443 ──────────────►│ ◄──────────── long-lived TLS:8443  │
+  │                                     │                                    │ → localhost:22
+  │  OPEN dst=target                    │ ── OPEN srcNode=client ─────────►  │
+  │                                     │                                    │
+  │ ◄═══════ DATA — opaque ciphertext (relay never decrypts) ═══════════════►│
+  │            ssh handshake + session, end-to-end encrypted                 │
+```
+
+Quick start (operator side):
+
+```sh
+# On a public-IP box:
+nagent relay serve --port 8443
+# → prints fingerprint AB:CD:…
+
+# Allow specific peers via mesh peers.json (auto) or explicitly:
+nagent relay grant <node-name> <pubkey-base64url>
+```
+
+Quick start (client side):
+
+```sh
+nagent relay add https://your-relay-host:8443   # prompts to confirm fingerprint
+nagent attach <peer>/<session> --via auto       # picks the lowest-latency path
+nagent attach <peer>/<session> --via <relay>    # force a specific relay
+nagent path status                              # inspect the path-table
+```
+
+The daemon probes direct TCP latency to peers every 60 s and pulls each pinned relay's STATUS for additive `me → relay → peer` estimates. Selection applies 10 ms hysteresis to avoid flapping between near-equal paths.
+
+Deferred to **v0.4**: per-peer `command=` SSH router (constrains peer access to a known set of nagent subcommands), `callerPub`-to-`$SSH_USER_AUTH_INFO_0` binding for gossip, daemon-startup heal pass, cross-node bus over persistent peer SSH tunnels (`bus-pipe`), `/install-service` for platform daemon units.
+
+Deferred to **v0.5.x / v0.6**: multi-hop relay chains, mid-session failover, Let's Encrypt cert provisioning, gossip-based relay auto-discovery.
 
 Open follow-ups: see [issues](https://github.com/YarnAgent/nagent/issues).
