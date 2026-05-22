@@ -5,6 +5,10 @@
 // hand-rolled to avoid a zod runtime dep; surface is small.
 import { decodeDataPayload, decodeClosePayload, decodeTimestampPayload } from "./frame.js";
 export const PROTOCOL_VERSION = 1;
+export function parseChallengePayload(p) {
+    const obj = parseJsonObject(p, "CHALLENGE");
+    return { nonce: requireNonEmptyString(obj, "nonce") };
+}
 export function parseRegisterPayload(p) {
     const obj = parseJsonObject(p, "REGISTER");
     return {
@@ -90,6 +94,7 @@ export { decodeDataPayload, decodeClosePayload, decodeTimestampPayload };
  */
 export function parseTypedFrame(f) {
     switch (f.verb) {
+        case 11 /* Verb.CHALLENGE */: return { verb: f.verb, payload: parseChallengePayload(f.payload) };
         case 1 /* Verb.REGISTER */: return { verb: f.verb, payload: parseRegisterPayload(f.payload) };
         case 2 /* Verb.REGISTER_OK */: return { verb: f.verb, payload: parseRegisterOkPayload(f.payload) };
         case 130 /* Verb.REGISTER_REJECT */: return { verb: f.verb, payload: parseRegisterRejectPayload(f.payload) };

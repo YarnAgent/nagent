@@ -22,6 +22,7 @@ const VERB_NAMES = {
     [8 /* Verb.PONG */]: "PONG",
     [9 /* Verb.STATUS_REQ */]: "STATUS_REQ",
     [10 /* Verb.STATUS_OK */]: "STATUS_OK",
+    [11 /* Verb.CHALLENGE */]: "CHALLENGE",
     [130 /* Verb.REGISTER_REJECT */]: "REGISTER_REJECT",
     [132 /* Verb.OPEN_REJECT */]: "OPEN_REJECT",
 };

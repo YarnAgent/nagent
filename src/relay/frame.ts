@@ -25,6 +25,8 @@ export const enum Verb {
   PONG             = 0x08,
   STATUS_REQ       = 0x09,
   STATUS_OK        = 0x0a,
+  // Relay → client one-way: server-issued nonce the client must sign in REGISTER.
+  CHALLENGE        = 0x0b,
   REGISTER_REJECT  = 0x82,
   OPEN_REJECT      = 0x84,
 }
@@ -40,6 +42,7 @@ const VERB_NAMES: Record<number, string> = {
   [Verb.PONG]: "PONG",
   [Verb.STATUS_REQ]: "STATUS_REQ",
   [Verb.STATUS_OK]: "STATUS_OK",
+  [Verb.CHALLENGE]: "CHALLENGE",
   [Verb.REGISTER_REJECT]: "REGISTER_REJECT",
   [Verb.OPEN_REJECT]: "OPEN_REJECT",
 };

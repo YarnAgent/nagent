@@ -9,6 +9,20 @@ import { Verb, type Frame, decodeDataPayload, decodeClosePayload, decodeTimestam
 export const PROTOCOL_VERSION = 1;
 
 // ---------------------------------------------------------------------------
+// CHALLENGE (R→C) — server-issued nonce the client must sign in REGISTER.
+// ---------------------------------------------------------------------------
+
+export interface ChallengePayload {
+  /** Base64url-encoded 32 random bytes. */
+  nonce: string;
+}
+
+export function parseChallengePayload(p: Buffer): ChallengePayload {
+  const obj = parseJsonObject(p, "CHALLENGE");
+  return { nonce: requireNonEmptyString(obj, "nonce") };
+}
+
+// ---------------------------------------------------------------------------
 // REGISTER (C→R)
 // ---------------------------------------------------------------------------
 
@@ -160,6 +174,7 @@ export { decodeDataPayload, decodeClosePayload, decodeTimestampPayload };
 // ---------------------------------------------------------------------------
 
 export type TypedFrame =
+  | { verb: Verb.CHALLENGE; payload: ChallengePayload }
   | { verb: Verb.REGISTER; payload: RegisterPayload }
   | { verb: Verb.REGISTER_OK; payload: RegisterOkPayload }
   | { verb: Verb.REGISTER_REJECT; payload: RegisterRejectPayload }
@@ -180,6 +195,7 @@ export type TypedFrame =
  */
 export function parseTypedFrame(f: Frame): TypedFrame | null {
   switch (f.verb) {
+    case Verb.CHALLENGE:       return { verb: f.verb, payload: parseChallengePayload(f.payload) };
     case Verb.REGISTER:        return { verb: f.verb, payload: parseRegisterPayload(f.payload) };
     case Verb.REGISTER_OK:     return { verb: f.verb, payload: parseRegisterOkPayload(f.payload) };
     case Verb.REGISTER_REJECT: return { verb: f.verb, payload: parseRegisterRejectPayload(f.payload) };
