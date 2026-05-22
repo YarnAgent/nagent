@@ -19,9 +19,15 @@ import {
   encodeJsonFrame,
   encodeFrame,
   encodePingFrame,
-  decodeTimestampPayload,
+  encodeDataFrame,
+  encodeCloseFrame,
 } from "./frame.js";
-import { parseTypedFrame, PROTOCOL_VERSION, type StatusOkPayload } from "./protocol.js";
+import {
+  parseTypedFrame,
+  PROTOCOL_VERSION,
+  type OpenPayload,
+  type StatusOkPayload,
+} from "./protocol.js";
 import { loadOrGenerateRelayCert } from "./cert.js";
 import { loadAllowlist, findAllowed, type AllowedPeer } from "./allowlist.js";
 
@@ -38,6 +44,18 @@ export interface RelayServerOptions {
   log?: (line: string) => void;
 }
 
+interface Stream {
+  src: ConnState;
+  /** streamId in the src conn's namespace (chosen by src). */
+  srcSid: number;
+  dst: ConnState;
+  /** streamId in the dst conn's namespace (chosen by the relay on forward). */
+  dstSid: number;
+  openedAt: Date;
+  /** True once the dst conn ACK'd with OPEN_OK; before that, DATA still forwards but the receiver may not yet be hooked up. */
+  established: boolean;
+}
+
 interface ConnState {
   id: number;
   socket: TLSSocket;
@@ -50,9 +68,14 @@ interface ConnState {
   pingInflight: bigint | null;
   lastSeen: Date;
   pingTimer: NodeJS.Timeout | null;
+  /** Streams keyed by THIS conn's local streamId (src or dst). */
+  streams: Map<number, Stream>;
+  /** Allocator the relay uses when it forwards an OPEN into this conn. */
+  outboundSidCounter: number;
 }
 
 const NONCE_BYTES = 32;
+const MAX_STREAMS_PER_CONN = 64;
 
 export class RelayServer {
   private readonly opts: Required<RelayServerOptions>;
@@ -147,6 +170,8 @@ export class RelayServer {
       pingInflight: null,
       lastSeen: new Date(),
       pingTimer: null,
+      streams: new Map(),
+      outboundSidCounter: 1,
     };
     this.conns.set(id, state);
 
@@ -210,12 +235,19 @@ export class RelayServer {
         await this.handleStatusReq(state);
         return;
       case Verb.OPEN:
+        this.handleOpen(state, frame.payload);
+        return;
+      case Verb.OPEN_OK:
+        this.handleOpenOk(state, frame.payload.streamId);
+        return;
+      case Verb.OPEN_REJECT:
+        this.handleOpenReject(state, frame.payload.streamId, frame.payload.reason);
+        return;
       case Verb.DATA:
+        this.handleData(state, frame.payload.streamId, frame.payload.bytes);
+        return;
       case Verb.CLOSE:
-        // Stream routing comes in task #28; until then, gently no-op.
-        if (state.registered) {
-          this.opts.log(`relay: conn ${state.id} sent ${frame.verb} but stream routing isn't wired yet`);
-        }
+        this.handleCloseFrame(state, frame.payload.streamId, frame.payload.reason);
         return;
       default:
         // Unexpected for a server: REGISTER_OK / REGISTER_REJECT / STATUS_OK / CHALLENGE / OPEN_OK / OPEN_REJECT.
@@ -306,6 +338,117 @@ export class RelayServer {
     state.pingTimer.unref();
   }
 
+  // -------------------------------------------------------------------------
+  // Stream routing — relay maps (srcConn, srcSid) ↔ (dstConn, dstSid). Each
+  // conn allocates its own streamIds; the relay picks a fresh sid in the dst
+  // namespace when forwarding an OPEN. Bytes are forwarded opaquely.
+  // -------------------------------------------------------------------------
+
+  private handleOpen(state: ConnState, p: OpenPayload): void {
+    if (!state.registered) { this.opts.log(`relay: conn ${state.id} OPEN before REGISTER`); return; }
+    if (!p.dstNodeName) {
+      this.sendOpenReject(state, p.streamId, "missing dstNodeName");
+      return;
+    }
+    if (state.streams.size >= MAX_STREAMS_PER_CONN) {
+      this.sendOpenReject(state, p.streamId, "stream-cap-exceeded");
+      return;
+    }
+    // streamId collisions inside the same conn aren't allowed.
+    if (state.streams.has(p.streamId)) {
+      this.sendOpenReject(state, p.streamId, "duplicate srcSid");
+      return;
+    }
+    const dst = this.byNode.get(p.dstNodeName);
+    if (!dst) {
+      this.sendOpenReject(state, p.streamId, "peer-not-registered");
+      return;
+    }
+    if (dst === state) {
+      this.sendOpenReject(state, p.streamId, "self-routing-not-allowed");
+      return;
+    }
+    if (dst.streams.size >= MAX_STREAMS_PER_CONN) {
+      this.sendOpenReject(state, p.streamId, "dst stream-cap-exceeded");
+      return;
+    }
+    const dstSid = this.allocOutboundSid(dst);
+    const stream: Stream = {
+      src: state, srcSid: p.streamId,
+      dst, dstSid,
+      openedAt: new Date(),
+      established: false,
+    };
+    state.streams.set(p.streamId, stream);
+    dst.streams.set(dstSid, stream);
+    // Forward to dst with srcNodeName populated so the receiver knows who's
+    // calling. The dst conn allocates no separate sid — it reuses dstSid.
+    this.send(dst, Verb.OPEN, Buffer.from(JSON.stringify({
+      streamId: dstSid,
+      srcNodeName: state.registered.nodeName,
+    }), "utf8"));
+  }
+
+  private handleOpenOk(state: ConnState, sid: number): void {
+    const stream = state.streams.get(sid);
+    if (!stream || stream.dst !== state) return; // ignore — OPEN_OK is dst→relay only
+    stream.established = true;
+    this.send(stream.src, Verb.OPEN_OK, Buffer.from(JSON.stringify({ streamId: stream.srcSid }), "utf8"));
+  }
+
+  private handleOpenReject(state: ConnState, sid: number, reason: string): void {
+    const stream = state.streams.get(sid);
+    if (!stream || stream.dst !== state) return;
+    this.send(stream.src, Verb.OPEN_REJECT, Buffer.from(JSON.stringify({
+      streamId: stream.srcSid, reason,
+    }), "utf8"));
+    this.dropStream(stream);
+  }
+
+  private handleData(state: ConnState, sid: number, bytes: Buffer): void {
+    const stream = state.streams.get(sid);
+    if (!stream) return;
+    const isSrc = stream.src === state;
+    const peer = isSrc ? stream.dst : stream.src;
+    const peerSid = isSrc ? stream.dstSid : stream.srcSid;
+    try {
+      peer.socket.write(encodeDataFrame(peerSid, bytes));
+    } catch (err) {
+      this.opts.log(`relay: conn ${state.id} stream ${sid} forward failed: ${(err as Error).message}`);
+    }
+  }
+
+  private handleCloseFrame(state: ConnState, sid: number, reason?: string): void {
+    const stream = state.streams.get(sid);
+    if (!stream) return;
+    const isSrc = stream.src === state;
+    const peer = isSrc ? stream.dst : stream.src;
+    const peerSid = isSrc ? stream.dstSid : stream.srcSid;
+    try {
+      peer.socket.write(encodeCloseFrame(peerSid, reason));
+    } catch { /* peer may have just dropped */ }
+    this.dropStream(stream);
+  }
+
+  private sendOpenReject(state: ConnState, sid: number, reason: string): void {
+    this.send(state, Verb.OPEN_REJECT, Buffer.from(JSON.stringify({ streamId: sid, reason }), "utf8"));
+  }
+
+  private allocOutboundSid(conn: ConnState): number {
+    // Linear probe; collisions are rare given our 64-stream cap.
+    for (let i = 0; i < 0x10000; i++) {
+      const sid = conn.outboundSidCounter++;
+      if (conn.outboundSidCounter > 0x7fff_ffff) conn.outboundSidCounter = 1;
+      if (!conn.streams.has(sid)) return sid;
+    }
+    throw new Error("allocOutboundSid: exhausted (shouldn't happen with the per-conn cap)");
+  }
+
+  private dropStream(s: Stream): void {
+    s.src.streams.delete(s.srcSid);
+    s.dst.streams.delete(s.dstSid);
+  }
+
   private send(state: ConnState, verb: Verb, payload: Buffer): void {
     try {
       state.socket.write(encodeFrame(verb, payload));
@@ -317,6 +460,14 @@ export class RelayServer {
   private closeConn(state: ConnState, reason: string): void {
     if (!this.conns.has(state.id)) return;
     if (state.pingTimer) { clearInterval(state.pingTimer); state.pingTimer = null; }
+    // Tear down all this conn's streams, notifying the peer side.
+    for (const stream of [...state.streams.values()]) {
+      const isSrc = stream.src === state;
+      const peer = isSrc ? stream.dst : stream.src;
+      const peerSid = isSrc ? stream.dstSid : stream.srcSid;
+      try { peer.socket.write(encodeCloseFrame(peerSid, "peer-disconnected")); } catch { /* peer may have dropped too */ }
+      this.dropStream(stream);
+    }
     if (state.registered && this.byNode.get(state.registered.nodeName) === state) {
       this.byNode.delete(state.registered.nodeName);
     }

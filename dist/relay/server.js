@@ -12,11 +12,12 @@
 import { createServer as createTlsServer } from "node:tls";
 import { randomBytes, verify as edVerify } from "node:crypto";
 import { publicKeyFromRaw } from "../ssh/identity.js";
-import { FrameDecoder, encodeJsonFrame, encodeFrame, encodePingFrame, } from "./frame.js";
-import { parseTypedFrame, PROTOCOL_VERSION } from "./protocol.js";
+import { FrameDecoder, encodeJsonFrame, encodeFrame, encodePingFrame, encodeDataFrame, encodeCloseFrame, } from "./frame.js";
+import { parseTypedFrame, PROTOCOL_VERSION, } from "./protocol.js";
 import { loadOrGenerateRelayCert } from "./cert.js";
 import { loadAllowlist, findAllowed } from "./allowlist.js";
 const NONCE_BYTES = 32;
+const MAX_STREAMS_PER_CONN = 64;
 export class RelayServer {
     opts;
     server = null;
@@ -107,6 +108,8 @@ export class RelayServer {
             pingInflight: null,
             lastSeen: new Date(),
             pingTimer: null,
+            streams: new Map(),
+            outboundSidCounter: 1,
         };
         this.conns.set(id, state);
         socket.on("data", (chunk) => this.onChunk(state, chunk));
@@ -167,12 +170,19 @@ export class RelayServer {
                 await this.handleStatusReq(state);
                 return;
             case 3 /* Verb.OPEN */:
+                this.handleOpen(state, frame.payload);
+                return;
+            case 4 /* Verb.OPEN_OK */:
+                this.handleOpenOk(state, frame.payload.streamId);
+                return;
+            case 132 /* Verb.OPEN_REJECT */:
+                this.handleOpenReject(state, frame.payload.streamId, frame.payload.reason);
+                return;
             case 5 /* Verb.DATA */:
+                this.handleData(state, frame.payload.streamId, frame.payload.bytes);
+                return;
             case 6 /* Verb.CLOSE */:
-                // Stream routing comes in task #28; until then, gently no-op.
-                if (state.registered) {
-                    this.opts.log(`relay: conn ${state.id} sent ${frame.verb} but stream routing isn't wired yet`);
-                }
+                this.handleCloseFrame(state, frame.payload.streamId, frame.payload.reason);
                 return;
             default:
                 // Unexpected for a server: REGISTER_OK / REGISTER_REJECT / STATUS_OK / CHALLENGE / OPEN_OK / OPEN_REJECT.
@@ -263,6 +273,119 @@ export class RelayServer {
         }, this.opts.pingIntervalMs);
         state.pingTimer.unref();
     }
+    // -------------------------------------------------------------------------
+    // Stream routing — relay maps (srcConn, srcSid) ↔ (dstConn, dstSid). Each
+    // conn allocates its own streamIds; the relay picks a fresh sid in the dst
+    // namespace when forwarding an OPEN. Bytes are forwarded opaquely.
+    // -------------------------------------------------------------------------
+    handleOpen(state, p) {
+        if (!state.registered) {
+            this.opts.log(`relay: conn ${state.id} OPEN before REGISTER`);
+            return;
+        }
+        if (!p.dstNodeName) {
+            this.sendOpenReject(state, p.streamId, "missing dstNodeName");
+            return;
+        }
+        if (state.streams.size >= MAX_STREAMS_PER_CONN) {
+            this.sendOpenReject(state, p.streamId, "stream-cap-exceeded");
+            return;
+        }
+        // streamId collisions inside the same conn aren't allowed.
+        if (state.streams.has(p.streamId)) {
+            this.sendOpenReject(state, p.streamId, "duplicate srcSid");
+            return;
+        }
+        const dst = this.byNode.get(p.dstNodeName);
+        if (!dst) {
+            this.sendOpenReject(state, p.streamId, "peer-not-registered");
+            return;
+        }
+        if (dst === state) {
+            this.sendOpenReject(state, p.streamId, "self-routing-not-allowed");
+            return;
+        }
+        if (dst.streams.size >= MAX_STREAMS_PER_CONN) {
+            this.sendOpenReject(state, p.streamId, "dst stream-cap-exceeded");
+            return;
+        }
+        const dstSid = this.allocOutboundSid(dst);
+        const stream = {
+            src: state, srcSid: p.streamId,
+            dst, dstSid,
+            openedAt: new Date(),
+            established: false,
+        };
+        state.streams.set(p.streamId, stream);
+        dst.streams.set(dstSid, stream);
+        // Forward to dst with srcNodeName populated so the receiver knows who's
+        // calling. The dst conn allocates no separate sid — it reuses dstSid.
+        this.send(dst, 3 /* Verb.OPEN */, Buffer.from(JSON.stringify({
+            streamId: dstSid,
+            srcNodeName: state.registered.nodeName,
+        }), "utf8"));
+    }
+    handleOpenOk(state, sid) {
+        const stream = state.streams.get(sid);
+        if (!stream || stream.dst !== state)
+            return; // ignore — OPEN_OK is dst→relay only
+        stream.established = true;
+        this.send(stream.src, 4 /* Verb.OPEN_OK */, Buffer.from(JSON.stringify({ streamId: stream.srcSid }), "utf8"));
+    }
+    handleOpenReject(state, sid, reason) {
+        const stream = state.streams.get(sid);
+        if (!stream || stream.dst !== state)
+            return;
+        this.send(stream.src, 132 /* Verb.OPEN_REJECT */, Buffer.from(JSON.stringify({
+            streamId: stream.srcSid, reason,
+        }), "utf8"));
+        this.dropStream(stream);
+    }
+    handleData(state, sid, bytes) {
+        const stream = state.streams.get(sid);
+        if (!stream)
+            return;
+        const isSrc = stream.src === state;
+        const peer = isSrc ? stream.dst : stream.src;
+        const peerSid = isSrc ? stream.dstSid : stream.srcSid;
+        try {
+            peer.socket.write(encodeDataFrame(peerSid, bytes));
+        }
+        catch (err) {
+            this.opts.log(`relay: conn ${state.id} stream ${sid} forward failed: ${err.message}`);
+        }
+    }
+    handleCloseFrame(state, sid, reason) {
+        const stream = state.streams.get(sid);
+        if (!stream)
+            return;
+        const isSrc = stream.src === state;
+        const peer = isSrc ? stream.dst : stream.src;
+        const peerSid = isSrc ? stream.dstSid : stream.srcSid;
+        try {
+            peer.socket.write(encodeCloseFrame(peerSid, reason));
+        }
+        catch { /* peer may have just dropped */ }
+        this.dropStream(stream);
+    }
+    sendOpenReject(state, sid, reason) {
+        this.send(state, 132 /* Verb.OPEN_REJECT */, Buffer.from(JSON.stringify({ streamId: sid, reason }), "utf8"));
+    }
+    allocOutboundSid(conn) {
+        // Linear probe; collisions are rare given our 64-stream cap.
+        for (let i = 0; i < 0x10000; i++) {
+            const sid = conn.outboundSidCounter++;
+            if (conn.outboundSidCounter > 0x7fff_ffff)
+                conn.outboundSidCounter = 1;
+            if (!conn.streams.has(sid))
+                return sid;
+        }
+        throw new Error("allocOutboundSid: exhausted (shouldn't happen with the per-conn cap)");
+    }
+    dropStream(s) {
+        s.src.streams.delete(s.srcSid);
+        s.dst.streams.delete(s.dstSid);
+    }
     send(state, verb, payload) {
         try {
             state.socket.write(encodeFrame(verb, payload));
@@ -277,6 +400,17 @@ export class RelayServer {
         if (state.pingTimer) {
             clearInterval(state.pingTimer);
             state.pingTimer = null;
+        }
+        // Tear down all this conn's streams, notifying the peer side.
+        for (const stream of [...state.streams.values()]) {
+            const isSrc = stream.src === state;
+            const peer = isSrc ? stream.dst : stream.src;
+            const peerSid = isSrc ? stream.dstSid : stream.srcSid;
+            try {
+                peer.socket.write(encodeCloseFrame(peerSid, "peer-disconnected"));
+            }
+            catch { /* peer may have dropped too */ }
+            this.dropStream(stream);
         }
         if (state.registered && this.byNode.get(state.registered.nodeName) === state) {
             this.byNode.delete(state.registered.nodeName);
