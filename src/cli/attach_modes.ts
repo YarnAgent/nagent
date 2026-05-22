@@ -18,7 +18,11 @@ import { shellSingleQuote } from "../lib/shell.js";
  * verify the remote until we actually try, so a failure to find mosh-server
  * on the remote surfaces as a mosh error code.
  */
-export async function attachMosh(sshHost: string, remoteSession: string): Promise<never> {
+export async function attachMosh(
+  sshHost: string,
+  remoteSession: string,
+  extraSshArgs: string[] = [],
+): Promise<never> {
   const localProbe = spawnSync("which", ["mosh"], { encoding: "utf8" });
   if (localProbe.status !== 0) {
     throw new Error(
@@ -31,7 +35,15 @@ export async function attachMosh(sshHost: string, remoteSession: string): Promis
   }
   const innerCmd = `nagent attach ${shellSingleQuote(remoteSession)}`;
   const remoteCmd = `"$SHELL" -ilc ${shellSingleQuote(innerCmd)}`;
-  const r = spawnSync("mosh", [sshHost, "--", remoteCmd], { stdio: "inherit" });
+  // mosh has a --ssh option for extra ssh args; collapse the array into one
+  // shell-quoted string. Empty extras → no override.
+  const moshArgs: string[] = [];
+  if (extraSshArgs.length > 0) {
+    const sshCmd = ["ssh", ...extraSshArgs.map((a) => shellSingleQuote(a))].join(" ");
+    moshArgs.push(`--ssh=${sshCmd}`);
+  }
+  moshArgs.push(sshHost, "--", remoteCmd);
+  const r = spawnSync("mosh", moshArgs, { stdio: "inherit" });
   process.exit(r.status ?? 0);
 }
 
@@ -56,7 +68,11 @@ export async function attachMosh(sshHost: string, remoteSession: string): Promis
  *     not as a real PTY. The remote helper detects the pane's `alternate_screen`
  *     flag and warns at start-of-line if the user enters one.
  */
-export async function attachLine(sshHost: string, remoteSession: string): Promise<never> {
+export async function attachLine(
+  sshHost: string,
+  remoteSession: string,
+  extraSshArgs: string[] = [],
+): Promise<never> {
   const prompt = `[${sshHost.replace(/^nagent\./, "")}:${remoteSession}] $ `;
   const innerCmd = `nagent attach-line ${shellSingleQuote(remoteSession)}`;
   const remoteCmd = `"$SHELL" -ilc ${shellSingleQuote(innerCmd)}`;
@@ -65,7 +81,7 @@ export async function attachLine(sshHost: string, remoteSession: string): Promis
   // -o ServerAliveInterval=30: keep the long-lived SSH session alive.
   const child = spawn(
     "ssh",
-    ["-T", "-o", "ServerAliveInterval=30", "-o", "BatchMode=yes", sshHost, "--", remoteCmd],
+    [...extraSshArgs, "-T", "-o", "ServerAliveInterval=30", "-o", "BatchMode=yes", sshHost, "--", remoteCmd],
     { stdio: ["pipe", "pipe", "inherit"] },
   );
 

@@ -163,19 +163,21 @@ async function attachRemote(peer, sess, opts) {
     if (!target)
         throw new Error(`unknown peer: ${peer} (peers: ${list.map((p) => p.nodeName).join(", ")})`);
     const sshHost = `nagent.${peer}`;
+    const { resolveSshTransportArgs } = await import("../routing/ssh-args.js");
+    const extra = await resolveSshTransportArgs(peer, opts.via ? { via: opts.via } : {});
     if (opts.mosh) {
-        await attachMosh(sshHost, sess);
+        await attachMosh(sshHost, sess, extra);
         return; // attachMosh execs / exits
     }
     if (opts.line) {
-        await attachLine(sshHost, sess);
+        await attachLine(sshHost, sess, extra);
         return; // attachLine never resolves; exits on remote exit
     }
     // Default mode (v0.2 behavior): ssh -t with PTY, remote runs `nagent attach`.
     const innerCmd = `nagent attach ${shellSingleQuote(sess)}`;
     const remoteCmd = `"$SHELL" -ilc ${shellSingleQuote(innerCmd)}`;
     const { spawnSync } = await import("node:child_process");
-    const r = spawnSync("ssh", ["-t", sshHost, "--", remoteCmd], { stdio: "inherit" });
+    const r = spawnSync("ssh", [...extra, "-t", sshHost, "--", remoteCmd], { stdio: "inherit" });
     process.exit(r.status ?? 0);
 }
 async function cmdList(opts) {

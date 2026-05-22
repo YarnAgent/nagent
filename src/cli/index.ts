@@ -200,13 +200,15 @@ async function attachRemote(peer: string, sess: string, opts: AttachOpts): Promi
   const target = list.find((p) => p.nodeName === peer);
   if (!target) throw new Error(`unknown peer: ${peer} (peers: ${list.map((p) => p.nodeName).join(", ")})`);
   const sshHost = `nagent.${peer}`;
+  const { resolveSshTransportArgs } = await import("../routing/ssh-args.js");
+  const extra = await resolveSshTransportArgs(peer, opts.via ? { via: opts.via } : {});
 
   if (opts.mosh) {
-    await attachMosh(sshHost, sess);
+    await attachMosh(sshHost, sess, extra);
     return; // attachMosh execs / exits
   }
   if (opts.line) {
-    await attachLine(sshHost, sess);
+    await attachLine(sshHost, sess, extra);
     return; // attachLine never resolves; exits on remote exit
   }
 
@@ -216,7 +218,7 @@ async function attachRemote(peer: string, sess: string, opts: AttachOpts): Promi
   const { spawnSync } = await import("node:child_process");
   const r = spawnSync(
     "ssh",
-    ["-t", sshHost, "--", remoteCmd],
+    [...extra, "-t", sshHost, "--", remoteCmd],
     { stdio: "inherit" },
   );
   process.exit(r.status ?? 0);

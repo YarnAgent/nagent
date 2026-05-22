@@ -63,4 +63,22 @@ export function transportEqual(a, b) {
 export function transportLabel(t) {
     return t.type === "direct" ? "direct" : `via:${t.relay}`;
 }
+/**
+ * Translate a Transport into extra ssh CLI args. For direct: empty. For
+ * via-relay: `["-o", "ProxyCommand=nagent relay-dial <peer> --relay <name>"]`.
+ *
+ * Both peer name and relay name are surrounded with single quotes to defeat
+ * shell metacharacters in pathological mesh configurations.
+ */
+export function transportSshArgs(transport, targetPeer) {
+    if (transport.type === "direct")
+        return [];
+    const peer = shellSingleQuote(targetPeer);
+    const relay = shellSingleQuote(transport.relay);
+    return ["-o", `ProxyCommand=nagent relay-dial ${peer} --relay ${relay}`];
+}
+function shellSingleQuote(s) {
+    // Safe substitution: replace ' with '\'' inside a single-quoted string.
+    return `'${s.replace(/'/g, `'\\''`)}'`;
+}
 //# sourceMappingURL=index.js.map

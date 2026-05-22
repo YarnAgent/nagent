@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { readPeers } from "../store/index.js";
 import { runWithConcurrency } from "../gossip/index.js";
 import { shellSingleQuote } from "../lib/shell.js";
+import { resolveSshTransportArgs } from "../routing/ssh-args.js";
 /**
  * Fan out `nagent list --local --json` to every peer in the active net,
  * merge results with the local sessions, and return a flat row list plus the
@@ -25,7 +26,8 @@ export async function fanoutSessionsAcrossNet(input) {
     // sourcing can easily eat 1-2s) plus Tailscale RTT plus SSH handshake.
     // The ADR said 3s; real-world testing showed that's too tight in practice.
     const results = await runWithConcurrency(others, 16, async (peer) => {
-        return sshListLocal(`nagent.${peer.nodeName}`, remoteArgs, 8000);
+        const extra = await resolveSshTransportArgs(peer.nodeName);
+        return sshListLocal(`nagent.${peer.nodeName}`, remoteArgs, 8000, extra);
     });
     for (let i = 0; i < others.length; i++) {
         const peer = others[i];
@@ -49,7 +51,7 @@ export async function fanoutSessionsAcrossNet(input) {
  * `nagent` is on PATH — same trick as `attach`. Single-quoted to survive ssh's
  * argv-flattening.
  */
-async function sshListLocal(sshHost, remoteArgs, timeoutMs) {
+async function sshListLocal(sshHost, remoteArgs, timeoutMs, extraSshArgs = []) {
     // The remote user's login shell is what has nvm/fnm/mise sourced. macOS
     // defaults to zsh — bash -ilc won't load .zprofile, so nagent isn't on
     // PATH. Use $SHELL (which sshd sets to the remote user's login shell).
@@ -57,6 +59,7 @@ async function sshListLocal(sshHost, remoteArgs, timeoutMs) {
     const wrappedCmd = `"$SHELL" -ilc ${shellSingleQuote(innerCmd)}`;
     return new Promise((resolve, reject) => {
         const args = [
+            ...extraSshArgs,
             "-o", "BatchMode=yes",
             "-o", `ConnectTimeout=${Math.max(1, Math.ceil(timeoutMs / 1000))}`,
             sshHost,
