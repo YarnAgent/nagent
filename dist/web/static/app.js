@@ -19,11 +19,96 @@ const listEl = document.getElementById("sessions-list");
 const terminalPanel = document.getElementById("terminal-panel");
 const terminalTitle = document.getElementById("terminal-title");
 const terminalContainer = document.getElementById("terminal-container");
+const modeToolbar = document.getElementById("mode-toolbar");
+const modeBtnLine = document.getElementById("mode-btn-line");
+const modeBtnDirect = document.getElementById("mode-btn-direct");
+const controlRow = document.getElementById("control-row");
+const lineForm = document.getElementById("line-form");
+const lineInput = document.getElementById("line-input");
+
+const DEFAULT_MODE = "line";
+const MAX_LINE_BYTES = 16384;
 
 let term = null;
 let fit = null;
 let activeWs = null;
 let activeRow = null;
+let currentMode = DEFAULT_MODE;
+
+function modeKey(node, session) {
+  return `nagent.mode.${node}/${session}`;
+}
+
+function readMode(node, session) {
+  try {
+    const v = localStorage.getItem(modeKey(node, session));
+    return v === "direct" ? "direct" : DEFAULT_MODE;
+  } catch {
+    return DEFAULT_MODE;
+  }
+}
+
+function writeMode(node, session, mode) {
+  try { localStorage.setItem(modeKey(node, session), mode); } catch { /* ignore quota */ }
+}
+
+function sendInput(payload) {
+  if (!activeWs || activeWs.readyState !== WebSocket.OPEN) return;
+  // Strip NULs and cap at MAX_LINE_BYTES bytes as defense-in-depth.
+  let safe = payload.replace(/\x00/g, "");
+  if (safe.length > MAX_LINE_BYTES) safe = safe.slice(0, MAX_LINE_BYTES);
+  activeWs.send("0" + safe);
+}
+
+function applyMode(mode) {
+  currentMode = mode;
+  const lineActive = mode === "line";
+  controlRow.hidden = !lineActive;
+  lineForm.hidden = !lineActive;
+  terminalContainer.classList.toggle("mode-line", lineActive);
+  terminalContainer.classList.toggle("mode-direct", !lineActive);
+  modeBtnLine.classList.toggle("active", lineActive);
+  modeBtnDirect.classList.toggle("active", !lineActive);
+  modeBtnLine.setAttribute("aria-pressed", String(lineActive));
+  modeBtnDirect.setAttribute("aria-pressed", String(!lineActive));
+  if (term) {
+    try { term.options.disableStdin = lineActive; } catch { /* older xterm */ }
+  }
+  if (lineActive) {
+    setTimeout(() => lineInput.focus(), 0);
+  } else {
+    setTimeout(() => { if (term) term.focus(); }, 0);
+  }
+}
+
+function switchMode(newMode) {
+  if (!activeRow || newMode === currentMode) return;
+  applyMode(newMode);
+  writeMode(activeRow.node, activeRow.session.name, newMode);
+}
+
+modeBtnLine.addEventListener("click", () => switchMode("line"));
+modeBtnDirect.addEventListener("click", () => switchMode("direct"));
+
+controlRow.addEventListener("click", (ev) => {
+  const btn = ev.target instanceof Element ? ev.target.closest(".ctl-btn") : null;
+  if (!btn) return;
+  const hex = btn.getAttribute("data-send");
+  if (!hex) return;
+  const code = parseInt(hex, 16);
+  if (Number.isNaN(code)) return;
+  sendInput(String.fromCharCode(code));
+  // Keep focus on the input so the user can keep typing.
+  lineInput.focus();
+});
+
+lineForm.addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const value = lineInput.value;
+  // Even an empty Enter is meaningful (re-issue prompt), so always send \r.
+  sendInput(value + "\r");
+  lineInput.value = "";
+});
 
 async function loadInfo() {
   try {
@@ -107,12 +192,16 @@ async function openSession(row) {
   terminalPanel.hidden = false;
   terminalTitle.textContent = `${row.node}/${row.session.name} — connecting…`;
   terminalContainer.innerHTML = "";
+  modeToolbar.hidden = false;
+  lineInput.value = "";
 
+  const persistedMode = readMode(row.node, row.session.name);
   term = new Terminal({
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
     fontSize: 13,
     cursorBlink: true,
     scrollback: 10000,
+    disableStdin: persistedMode === "line",
     theme: { background: "#0d1117", foreground: "#c9d1d9" },
   });
   fit = new FitAddon();
@@ -155,6 +244,8 @@ async function openSession(row) {
   });
 
   term.onData((data) => {
+    // In line mode, xterm input is suppressed: the user types into the line input field instead.
+    if (currentMode !== "direct") return;
     if (ws.readyState === WebSocket.OPEN) ws.send("0" + data);
   });
   term.onResize(({ cols, rows }) => {
@@ -163,6 +254,8 @@ async function openSession(row) {
   window.addEventListener("resize", () => {
     if (fit && term) fit.fit();
   });
+
+  applyMode(persistedMode);
 }
 
 function handleServerFrame(bytes) {

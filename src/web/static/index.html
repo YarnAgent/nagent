@@ -18,8 +18,25 @@
       <ul id="sessions-list"><li class="hint">fetching…</li></ul>
     </section>
     <section id="terminal-panel" hidden>
-      <h2 id="terminal-title">terminal</h2>
-      <div id="terminal-container"></div>
+      <div class="terminal-header">
+        <h2 id="terminal-title">terminal</h2>
+        <div class="mode-toolbar" id="mode-toolbar" role="group" aria-label="Input mode" hidden>
+          <button type="button" class="mode-btn" data-mode="line" id="mode-btn-line" aria-pressed="true">Line</button>
+          <button type="button" class="mode-btn" data-mode="direct" id="mode-btn-direct" aria-pressed="false">Direct</button>
+        </div>
+      </div>
+      <div class="control-row" id="control-row" hidden>
+        <button type="button" class="ctl-btn" data-send="03" title="Send Ctrl-C (SIGINT)">Ctrl-C</button>
+        <button type="button" class="ctl-btn" data-send="04" title="Send Ctrl-D (EOF)">Ctrl-D</button>
+        <button type="button" class="ctl-btn" data-send="1a" title="Send Ctrl-Z (SIGTSTP)">Ctrl-Z</button>
+        <button type="button" class="ctl-btn" data-send="09" title="Send Tab">Tab</button>
+        <button type="button" class="ctl-btn" data-send="1b" title="Send Esc">Esc</button>
+      </div>
+      <div id="terminal-container" class="mode-line"></div>
+      <form id="line-form" autocomplete="off">
+        <input id="line-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+          placeholder="Type a command and press Enter — switch to Direct for vim/TUIs" />
+      </form>
     </section>
   </main>
   <script type="module" src="/static/app.js"></script>
