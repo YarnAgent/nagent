@@ -5,14 +5,25 @@ import { spawn } from "node:child_process";
 import { paths, TMUX_SOCKET_NAME } from "../platform/paths.js";
 import { encodeFrame, FrameDecoder } from "../bus/frame.js";
 import { matches } from "../bus/match.js";
-import { writeJson, readJson } from "../store/json.js";
-import { ensureNagentRoot, readIdentity } from "../store/index.js";
+import { writeJson, readJson, readJson as _readJson } from "../store/json.js";
+import { ensureNagentRoot, readIdentity, readActiveState } from "../store/index.js";
+import { loadSshKeypair } from "../ssh/identity.js";
+import { RelayClient } from "../relay/client.js";
+import { readPinnedRelays } from "../relay/pinned.js";
+import { runProbeRound } from "../routing/probe.js";
+void _readJson;
+const PROBE_INTERVAL_MS = 60_000;
+const PROBE_INITIAL_DELAY_MS = 5_000;
 const QUEUE_LIMIT = 256;
 export class Daemon {
     server = null;
     clients = new Set();
     sessions = new Map();
     nodeName = "node";
+    relayClient = null;
+    pinnedRelayNames = [];
+    probeTimer = null;
+    probeStartTimer = null;
     log;
     foreground;
     constructor(opts) {
@@ -41,8 +52,26 @@ export class Daemon {
         });
         await fs.chmod(sockPath, 0o600).catch(() => { });
         this.log(`nagentd listening on ${sockPath} (node=${this.nodeName})`);
+        // v0.5: start the relay-client (if any relays are pinned) and the
+        // periodic path-probe loop. Both are best-effort — failures here must
+        // not crash the bus daemon.
+        await this.startRelaySubsystem().catch((err) => {
+            this.log(`relay subsystem failed to start: ${err.message}`);
+        });
     }
     async stop() {
+        if (this.probeStartTimer) {
+            clearTimeout(this.probeStartTimer);
+            this.probeStartTimer = null;
+        }
+        if (this.probeTimer) {
+            clearInterval(this.probeTimer);
+            this.probeTimer = null;
+        }
+        if (this.relayClient) {
+            await this.relayClient.stop().catch(() => { });
+            this.relayClient = null;
+        }
         for (const c of this.clients) {
             try {
                 c.socket.destroy();
@@ -54,6 +83,73 @@ export class Daemon {
             this.server?.close(() => resolve());
         });
         this.server = null;
+    }
+    // -------------------------------------------------------------------------
+    // v0.5 relay subsystem
+    // -------------------------------------------------------------------------
+    async startRelaySubsystem() {
+        const pinned = await readPinnedRelays();
+        if (pinned.length === 0) {
+            // No relays pinned, but we still want the probe loop for direct-only
+            // path-table data (`nagent path status` populated even on Tailscale-only
+            // nodes).
+            this.log("relay: no pinned relays — running direct-only probe loop");
+            this.startProbeLoop();
+            return;
+        }
+        const id = await readIdentity();
+        if (!id) {
+            this.log("relay: no identity yet — skipping relay-client start");
+            return;
+        }
+        let kp;
+        try {
+            kp = await loadSshKeypair(id.nodeId);
+        }
+        catch (err) {
+            this.log(`relay: cannot load ed25519 keypair: ${err.message}`);
+            return;
+        }
+        this.relayClient = new RelayClient({
+            identity: {
+                nodeName: id.nodeName,
+                pubKey: kp.rawPub.toString("base64url"),
+                privateKey: kp.privKey,
+            },
+            ipcSockPath: paths().relayClientSock,
+            log: (line) => this.log(line),
+        });
+        this.pinnedRelayNames = pinned.map((p) => p.name);
+        await this.relayClient.start(pinned);
+        this.log(`relay: started client with ${pinned.length} pinned relay(s)`);
+        this.startProbeLoop();
+    }
+    startProbeLoop() {
+        if (this.probeTimer || this.probeStartTimer)
+            return;
+        // First tick 5 s after start so we don't pile on cold-start work.
+        this.probeStartTimer = setTimeout(() => {
+            this.probeStartTimer = null;
+            void this.runProbeTick();
+            this.probeTimer = setInterval(() => { void this.runProbeTick(); }, PROBE_INTERVAL_MS);
+            this.probeTimer.unref();
+        }, PROBE_INITIAL_DELAY_MS);
+        this.probeStartTimer.unref();
+    }
+    async runProbeTick() {
+        try {
+            const active = await readActiveState();
+            if (!active.activeNetId)
+                return;
+            await runProbeRound({
+                netId: active.activeNetId,
+                selfNodeName: this.nodeName,
+                ...(this.relayClient ? { relayClient: this.relayClient, relayNames: this.pinnedRelayNames } : {}),
+            });
+        }
+        catch (err) {
+            this.log(`relay: probe round failed: ${err.message}`);
+        }
     }
     get nodeId() {
         return this.nodeName;
