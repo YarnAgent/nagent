@@ -31,7 +31,11 @@ import {
 } from "./index.js";
 
 const DEFAULT_TCP_TIMEOUT_MS = 1_500;
-const DEFAULT_SSH_PROBE_TIMEOUT_MS = 6_000;
+// 15 s accommodates cold SSH handshakes on slow long-haul paths (e.g. home
+// network → CN cloud relay; macOS sshd's cold-start with PAM + mDNS can add
+// several seconds on its own). A typical LAN/tailnet probe completes in
+// under a second; this is just the upper bound.
+const DEFAULT_SSH_PROBE_TIMEOUT_MS = 15_000;
 const DIRECT_CONCURRENCY = 4;
 const VIA_RELAY_CONCURRENCY = 4;
 
