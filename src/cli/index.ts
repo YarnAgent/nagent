@@ -300,7 +300,7 @@ function printSessionsTable(sessions: import("../types/index.js").ListResultEntr
 }
 
 function printNetTable(
-  rows: Array<{ node: string; session: import("../types/index.js").ListResultEntry }>,
+  rows: Array<{ node: string; session: import("../types/index.js").ListResultEntry; via?: string }>,
   unreachable: string[],
 ): void {
   if (rows.length === 0 && unreachable.length === 0) {
@@ -311,13 +311,19 @@ function printNetTable(
   const nameWidth = Math.max(4, ...rows.map((r) => r.session.name.length));
   const addrWidth = Math.max(7, ...rows.map((r) => r.session.address.length));
   const projWidth = Math.max(7, ...rows.map((r) => (r.session.project ?? "-").length));
+  // Only render the VIA column when at least one row was reached via a relay.
+  // Keeps the common (all-direct) output unchanged.
+  const showVia = rows.some((r) => typeof r.via === "string" && r.via.length > 0);
+  const viaWidth = showVia ? Math.max(3, ...rows.map((r) => (r.via ?? "-").length)) : 0;
+  const viaHeader = showVia ? `  ${"VIA".padEnd(viaWidth)}` : "";
   process.stdout.write(
-    `${"NODE".padEnd(nodeWidth)}  ${"NAME".padEnd(nameWidth)}  ${"ADDRESS".padEnd(addrWidth)}  ${"PROJECT".padEnd(projWidth)}  ATT  ROLES\n`,
+    `${"NODE".padEnd(nodeWidth)}  ${"NAME".padEnd(nameWidth)}  ${"ADDRESS".padEnd(addrWidth)}  ${"PROJECT".padEnd(projWidth)}  ATT  ROLES${viaHeader}\n`,
   );
-  for (const { node, session: s } of rows) {
+  for (const { node, session: s, via } of rows) {
     const roles = s.roles.length ? s.roles.join(",") : "-";
+    const viaCell = showVia ? `  ${(via ?? "-").padEnd(viaWidth)}` : "";
     process.stdout.write(
-      `${node.padEnd(nodeWidth)}  ${s.name.padEnd(nameWidth)}  ${s.address.padEnd(addrWidth)}  ${(s.project ?? "-").padEnd(projWidth)}  ${String(s.attached).padStart(3)}  ${roles}\n`,
+      `${node.padEnd(nodeWidth)}  ${s.name.padEnd(nameWidth)}  ${s.address.padEnd(addrWidth)}  ${(s.project ?? "-").padEnd(projWidth)}  ${String(s.attached).padStart(3)}  ${roles}${viaCell}\n`,
     );
   }
   for (const node of unreachable) {
