@@ -519,12 +519,13 @@ async function main() {
         .description("stop the relay daemon running on this box")
         .action(async () => { await cmdRelayStop(); });
     relayCmd
-        .command("add <url>")
-        .description("pin a relay URL — fetches + prompts for fingerprint, then stores it locally")
-        .option("--name <name>", "store under this name (default: relay URL's host)")
-        .option("-y, --yes", "skip the confirmation prompt")
-        .action(async (url, opts) => {
-        await cmdRelayAdd(url, opts);
+        .command("add <url-or-ssh-target>")
+        .description("pin a relay. https:// → TLS transport; ssh://user@host or user@host → ssh-jump transport")
+        .option("--name <name>", "store under this name (default: host portion of the input)")
+        .option("-y, --yes", "skip the confirmation prompt (TLS transport only)")
+        .option("--copy-id", "(ssh-jump) install the local nagent pubkey into the relay's authorized_keys via ssh")
+        .action(async (input, opts) => {
+        await cmdRelayAdd(input, opts);
     });
     relayCmd
         .command("remove <name>")

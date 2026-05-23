@@ -158,6 +158,7 @@ git config core.hooksPath .githooks
 
 | Tag | What shipped |
 |---|---|
+| **v0.5.1** (in flight) | `ssh-jump` transport — relay is any sshd-running box with the client's nagent pubkey in `authorized_keys`. Traffic flows over `ssh -J`. Works through every middlebox that allows port 22 (including restrictive cloud edges where the v0.5 TLS variant gets RST'd). `nagent relay add ssh://user@host --copy-id`. |
 | **v0.5** (in flight) | `nagent relay serve` — dumb-pipe TCP rendezvous on TLS:8443 with self-signed cert pinning; latency-aware `chooseTransport` w/ 10 ms hysteresis (Tailscale-style); `--via auto\|direct\|<relay>` flag on attach; ssh ProxyCommand wired at every SSH spawn site. Tailscale becomes **optional**. ([ADR-0003](docs/architecture/adr/0003-v0.5-nagent-relay.md)) |
 | **v0.4** (in flight) | `nagent web serve` + xterm.js SPA — browser access to mesh sessions via SSH-tunneled ttyd. Default browser input is Line mode (single-line buffered shell, zero per-keystroke RTT). ([ADR-0002](docs/architecture/adr/0002-v0.4-web-hub.md)) |
 | **v0.3.1** | Fix: cross-node gossip ssh now wraps in `"$SHELL" -ilc` for macOS zsh compatibility. |
@@ -167,7 +168,26 @@ git config core.hooksPath .githooks
 
 ## Routing (v0.5 preview)
 
-`nagent attach` now picks the best transport per peer using a node-local path-table:
+`nagent attach` picks the best transport per peer using a node-local path-table. v0.5 ships **two relay transports**:
+
+### `ssh-jump` (v0.5.1) — recommended default
+
+The simplest possible relay: **the relay is just an sshd-running box** that holds your nagent ed25519 pubkey in `authorized_keys`. Traffic flows as `ssh -J relay user@target` — port 22 is universally allowed by every firewall, ISP, and cloud edge, so this works **everywhere**, including behind aggressive TLS inspection (mainland-CN cloud edges, corporate proxies).
+
+```sh
+# On any reachable Linux box with sshd (the "relay") — nothing to install:
+
+# On every client:
+nagent relay add ssh://ubuntu@your-jump-box --copy-id --name jump-eu
+nagent attach <peer>/<session> --via jump-eu      # force ssh-jump
+nagent attach <peer>/<session>                    # auto-pick after a probe round
+```
+
+`--copy-id` installs the local nagent pubkey into the relay's `~/.ssh/authorized_keys`. If you already trust your nagent identity on that box, you can skip it. The relay needs to be able to reach the target peer (typically via Tailscale).
+
+### `tls` (v0.5) — long-lived TLS rendezvous
+
+A persistent TLS daemon (`nagent relay serve --port 8443`) with self-signed cert pinning. Carries opaque streams over TLS. Useful when SSH outbound is constrained but HTTPS-like traffic isn't (rare); blocked on networks that drop self-signed TLS on non-443 ports (most mainland-CN cloud edges).
 
 ```
 client                                 relay (any sshd-less box w/ public IP)        target
@@ -179,8 +199,6 @@ client                                 relay (any sshd-less box w/ public IP)   
   │            ssh handshake + session, end-to-end encrypted                 │
 ```
 
-Quick start (operator side):
-
 ```sh
 # On a public-IP box:
 nagent relay serve --port 8443
@@ -188,18 +206,21 @@ nagent relay serve --port 8443
 
 # Allow specific peers via mesh peers.json (auto) or explicitly:
 nagent relay grant <node-name> <pubkey-base64url>
+
+# On every client:
+nagent relay add https://your-relay-host:8443   # TOFU fingerprint pin
 ```
 
-Quick start (client side):
+### Auto-selection across both transports
+
+Both transports register the same way in the path-table. The daemon probes them every 60 s — direct TCP-connect for `direct`, STATUS pull for TLS relays, and a real `ssh -J … true` probe for ssh-jump relays. `chooseTransport` picks the lowest-latency candidate with 10 ms hysteresis. Manual override:
 
 ```sh
-nagent relay add https://your-relay-host:8443   # prompts to confirm fingerprint
-nagent attach <peer>/<session> --via auto       # picks the lowest-latency path
-nagent attach <peer>/<session> --via <relay>    # force a specific relay
-nagent path status                              # inspect the path-table
+nagent attach <peer>/<session> --via auto       # default: best latency
+nagent attach <peer>/<session> --via direct     # force direct (no relay)
+nagent attach <peer>/<session> --via <name>     # force a specific relay
+nagent path status                              # inspect path-table
 ```
-
-The daemon probes direct TCP latency to peers every 60 s and pulls each pinned relay's STATUS for additive `me → relay → peer` estimates. Selection applies 10 ms hysteresis to avoid flapping between near-equal paths.
 
 Deferred to **v0.4**: per-peer `command=` SSH router (constrains peer access to a known set of nagent subcommands), `callerPub`-to-`$SSH_USER_AUTH_INFO_0` binding for gossip, daemon-startup heal pass, cross-node bus over persistent peer SSH tunnels (`bus-pipe`), `/install-service` for platform daemon units.
 

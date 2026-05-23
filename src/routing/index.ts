@@ -126,14 +126,34 @@ export function transportLabel(t: Transport): string {
 }
 
 /**
- * Translate a Transport into extra ssh CLI args. For direct: empty. For
- * via-relay: `["-o", "ProxyCommand=nagent relay-dial <peer> --relay <name>"]`.
+ * Translate a Transport into extra ssh CLI args.
  *
- * Both peer name and relay name are surrounded with single quotes to defeat
- * shell metacharacters in pathological mesh configurations.
+ *   direct                                 → []
+ *   via:<tls-relay>                        → ["-o", "ProxyCommand=nagent relay-dial '<peer>' --relay '<name>'"]
+ *   via:<ssh-jump-relay> (pinned.kind set) → ["-J", "<sshTarget>"]
+ *
+ * `pinnedKind` discriminates the via-branch. When it's `"ssh-jump"`, the
+ * caller must also pass `sshJumpTarget`. resolveSshTransportArgs() reads
+ * the pinned record and threads these through; direct callers (tests) can
+ * pass them inline.
  */
-export function transportSshArgs(transport: Transport, targetPeer: string): string[] {
+export interface TransportArgsExtras {
+  pinnedKind?: "tls" | "ssh-jump";
+  sshJumpTarget?: string;
+}
+
+export function transportSshArgs(
+  transport: Transport,
+  targetPeer: string,
+  extras?: TransportArgsExtras,
+): string[] {
   if (transport.type === "direct") return [];
+  if (extras?.pinnedKind === "ssh-jump") {
+    if (!extras.sshJumpTarget) {
+      throw new Error(`ssh-jump transport requires sshJumpTarget (relay="${transport.relay}")`);
+    }
+    return ["-J", extras.sshJumpTarget];
+  }
   const peer = shellSingleQuote(targetPeer);
   const relay = shellSingleQuote(transport.relay);
   return ["-o", `ProxyCommand=nagent relay-dial ${peer} --relay ${relay}`];

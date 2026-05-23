@@ -3,6 +3,7 @@
 
 import { promises as fs, existsSync } from "node:fs";
 import { connect as tlsConnect } from "node:tls";
+import { spawn } from "node:child_process";
 import { URL } from "node:url";
 import { paths } from "../platform/paths.js";
 import { RelayServer } from "../relay/server.js";
@@ -12,6 +13,8 @@ import {
   listGrants,
 } from "../relay/allowlist.js";
 import { relayDial } from "../relay/dial.js";
+import { readIdentity } from "../store/index.js";
+import { loadSshKeypair } from "../ssh/identity.js";
 
 const DEFAULT_PORT = 8443;
 const DEFAULT_BIND = "0.0.0.0";
@@ -129,19 +132,55 @@ export async function cmdRelayStop(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// nagent relay add <url>
+// nagent relay add <input>     where <input> is one of:
+//   https://host:port           → TLS-transport pin (v0.5; current)
+//   ssh://user@host[:port]      → ssh-jump transport pin (v0.5.1; new)
+//   user@host[:port]            → same as the ssh:// form (shorthand)
 // ---------------------------------------------------------------------------
 
-export interface PinnedRelayRecord {
-  url: string;
-  fingerprint: string;
-  pinnedAt: string;
+// On-disk shape. Both transports may appear in the same file; consumers
+// (cli/list, daemon, routing) parse via src/relay/pinned.ts which knows
+// about the discriminated union.
+interface RawPinnedRecord {
+  transport?: "tls" | "ssh-jump";
+  url?: string;
+  fingerprint?: string;
+  sshTarget?: string;
+  pinnedAt?: string;
 }
-interface PinnedRelaysFile { v: 1; relays: Record<string, PinnedRelayRecord> }
+interface PinnedRelaysFile { v: 1; relays: Record<string, RawPinnedRecord> }
 
-export interface RelayAddOpts { name?: string; yes?: boolean }
+export interface RelayAddOpts { name?: string; yes?: boolean; copyId?: boolean }
 
-export async function cmdRelayAdd(url: string, opts: RelayAddOpts): Promise<void> {
+export async function cmdRelayAdd(input: string, opts: RelayAddOpts): Promise<void> {
+  const parsed = parseRelayInput(input);
+  if (parsed.kind === "tls") {
+    await addTlsRelay(parsed.url, opts);
+  } else {
+    await addSshJumpRelay(parsed.sshTarget, opts);
+  }
+}
+
+interface ParsedTls   { kind: "tls"; url: string }
+interface ParsedSshJump { kind: "ssh-jump"; sshTarget: string }
+
+function parseRelayInput(input: string): ParsedTls | ParsedSshJump {
+  if (input.startsWith("https://")) return { kind: "tls", url: input };
+  if (input.startsWith("ssh://"))  return { kind: "ssh-jump", sshTarget: input.slice("ssh://".length) };
+  // Bare user@host or user@host:port — anything with an `@` and no scheme.
+  if (/^[A-Za-z0-9_.\-]+@[A-Za-z0-9_.\-]+(:\d+)?$/.test(input)) {
+    return { kind: "ssh-jump", sshTarget: input };
+  }
+  throw new Error(
+    `unrecognized relay address: "${input}"\n` +
+      "  Use one of:\n" +
+      "    https://host:port         (TLS transport)\n" +
+      "    ssh://user@host[:port]    (ssh-jump transport)\n" +
+      "    user@host[:port]          (shorthand for ssh://)",
+  );
+}
+
+async function addTlsRelay(url: string, opts: RelayAddOpts): Promise<void> {
   const u = new URL(url);
   if (u.protocol !== "https:") throw new Error(`relay URL must be https:// (got ${u.protocol})`);
   const host = u.hostname;
@@ -149,6 +188,7 @@ export async function cmdRelayAdd(url: string, opts: RelayAddOpts): Promise<void
   const name = opts.name ?? host;
   const fingerprint = await fetchCertFingerprint(host, port);
 
+  process.stdout.write(`transport:     tls\n`);
   process.stdout.write(`relay:         ${url}\n`);
   process.stdout.write(`name:          ${name}\n`);
   process.stdout.write(`fingerprint:   ${fingerprint}\n`);
@@ -162,46 +202,93 @@ export async function cmdRelayAdd(url: string, opts: RelayAddOpts): Promise<void
     }
   }
 
-  const store = await readPinnedRelays();
-  store.relays[name] = { url, fingerprint, pinnedAt: new Date().toISOString() };
-  await writePinnedRelays(store);
+  const store = await readPinnedRelaysRaw();
+  store.relays[name] = { transport: "tls", url, fingerprint, pinnedAt: new Date().toISOString() };
+  await writePinnedRelaysRaw(store);
   process.stdout.write(`pinned as "${name}". (${paths().pinnedRelays})\n`);
 }
 
+async function addSshJumpRelay(sshTarget: string, opts: RelayAddOpts): Promise<void> {
+  const { user, host, port } = splitSshTarget(sshTarget);
+  const name = opts.name ?? host;
+
+  process.stdout.write(`transport:     ssh-jump\n`);
+  process.stdout.write(`ssh target:    ${sshTarget}\n`);
+  process.stdout.write(`name:          ${name}\n`);
+
+  if (opts.copyId) {
+    process.stdout.write(`\ninstalling nagent pubkey on ${sshTarget} ...\n`);
+    try {
+      await installPubkey(sshTarget);
+      process.stdout.write(`  ok\n`);
+    } catch (err) {
+      process.stderr.write(`  failed: ${(err as Error).message}\n`);
+      process.stderr.write(`  you can install it manually — see the line printed below.\n`);
+    }
+  } else {
+    process.stdout.write(`\nadd this line to ${sshTarget}:~/.ssh/authorized_keys:\n\n`);
+    const line = await getNagentAuthorizedKeysLine();
+    process.stdout.write(`  ${line}\n\n`);
+    process.stdout.write(`or rerun with --copy-id to install it automatically.\n`);
+  }
+
+  process.stdout.write(`\nchecking reachability ...\n`);
+  const reachable = await sshReachable(sshTarget, 6000);
+  process.stdout.write(reachable ? `  ok\n` : `  not yet (auth not set up or host unreachable)\n`);
+
+  const store = await readPinnedRelaysRaw();
+  store.relays[name] = { transport: "ssh-jump", sshTarget, pinnedAt: new Date().toISOString() };
+  await writePinnedRelaysRaw(store);
+  process.stdout.write(`\npinned as "${name}". (${paths().pinnedRelays})\n`);
+  void user; void port; // used inside helpers
+}
+
 export async function cmdRelayRemove(name: string): Promise<void> {
-  const store = await readPinnedRelays();
+  const store = await readPinnedRelaysRaw();
   if (!store.relays[name]) {
     process.stdout.write(`relay "${name}" was not pinned\n`);
     return;
   }
   delete store.relays[name];
-  await writePinnedRelays(store);
+  await writePinnedRelaysRaw(store);
   process.stdout.write(`unpinned "${name}"\n`);
 }
 
 export async function cmdRelayList(): Promise<void> {
-  const store = await readPinnedRelays();
+  const store = await readPinnedRelaysRaw();
   const names = Object.keys(store.relays).sort();
-  if (names.length === 0) { process.stdout.write("(no pinned relays — use `nagent relay add <url>`)\n"); return; }
-  const rows: Array<{ name: string; url: string; fp: string; pinned: string }> = [];
+  if (names.length === 0) { process.stdout.write("(no pinned relays — use `nagent relay add <url-or-ssh-target>`)\n"); return; }
+
+  type Row = { name: string; transport: string; target: string; extra: string; pinned: string };
+  const rows: Row[] = [];
   for (const n of names) {
     const r = store.relays[n]!;
-    rows.push({ name: n, url: r.url, fp: r.fingerprint.slice(0, 23) + "…", pinned: r.pinnedAt });
+    const t = r.transport ?? "tls";
+    if (t === "ssh-jump") {
+      rows.push({ name: n, transport: "ssh-jump", target: r.sshTarget ?? "(missing)", extra: "", pinned: r.pinnedAt ?? "" });
+    } else {
+      const fp = r.fingerprint ? r.fingerprint.slice(0, 23) + "…" : "(no fingerprint)";
+      rows.push({ name: n, transport: "tls", target: r.url ?? "(missing)", extra: fp, pinned: r.pinnedAt ?? "" });
+    }
   }
   const w = {
     name: Math.max(4, ...rows.map((r) => r.name.length)),
-    url: Math.max(3, ...rows.map((r) => r.url.length)),
-    fp: 24,
-    pinned: Math.max(6, ...rows.map((r) => r.pinned.length)),
+    transport: Math.max(9, ...rows.map((r) => r.transport.length)),
+    target: Math.max(6, ...rows.map((r) => r.target.length)),
+    extra: Math.max(11, ...rows.map((r) => r.extra.length)),
   };
   const pad = (s: string, n: number) => s + " ".repeat(Math.max(0, n - s.length));
-  process.stdout.write(`${pad("NAME", w.name)}  ${pad("URL", w.url)}  ${pad("FINGERPRINT", w.fp)}  PINNED-AT\n`);
+  process.stdout.write(
+    `${pad("NAME", w.name)}  ${pad("TRANSPORT", w.transport)}  ${pad("TARGET", w.target)}  ${pad("FINGERPRINT", w.extra)}  PINNED-AT\n`,
+  );
   for (const r of rows) {
-    process.stdout.write(`${pad(r.name, w.name)}  ${pad(r.url, w.url)}  ${pad(r.fp, w.fp)}  ${r.pinned}\n`);
+    process.stdout.write(
+      `${pad(r.name, w.name)}  ${pad(r.transport, w.transport)}  ${pad(r.target, w.target)}  ${pad(r.extra, w.extra)}  ${r.pinned}\n`,
+    );
   }
 }
 
-async function readPinnedRelays(): Promise<PinnedRelaysFile> {
+async function readPinnedRelaysRaw(): Promise<PinnedRelaysFile> {
   try {
     const raw = await fs.readFile(paths().pinnedRelays, "utf8");
     const obj = JSON.parse(raw) as PinnedRelaysFile;
@@ -210,7 +297,7 @@ async function readPinnedRelays(): Promise<PinnedRelaysFile> {
   return { v: 1, relays: {} };
 }
 
-async function writePinnedRelays(store: PinnedRelaysFile): Promise<void> {
+async function writePinnedRelaysRaw(store: PinnedRelaysFile): Promise<void> {
   await fs.writeFile(paths().pinnedRelays, JSON.stringify(store, null, 2), { mode: 0o600 });
 }
 
@@ -257,6 +344,68 @@ export async function cmdRelayGrant(node: string, pubKey: string): Promise<void>
 export async function cmdRelayRevoke(node: string): Promise<void> {
   const ok = await removeGrant(node);
   process.stdout.write(ok ? `revoked: ${node}\n` : `no grant for "${node}"\n`);
+}
+
+// ---------------------------------------------------------------------------
+// ssh-jump helpers (used by addSshJumpRelay; also by the routing layer
+// indirectly via splitSshTarget when probing).
+// ---------------------------------------------------------------------------
+
+export function splitSshTarget(target: string): { user: string | null; host: string; port: number | null } {
+  const m = target.match(/^(?:([^@]+)@)?([^:]+)(?::(\d+))?$/);
+  if (!m || !m[2]) throw new Error(`invalid ssh target: "${target}"`);
+  return {
+    user: m[1] ?? null,
+    host: m[2],
+    port: m[3] ? Number(m[3]) : null,
+  };
+}
+
+async function sshReachable(sshTarget: string, timeoutMs: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const { user, host, port } = splitSshTarget(sshTarget);
+    const args = [
+      "-o", "BatchMode=yes",
+      "-o", `ConnectTimeout=${Math.ceil(timeoutMs / 1000)}`,
+      "-o", "StrictHostKeyChecking=accept-new",
+    ];
+    if (port) { args.push("-p", String(port)); }
+    args.push(user ? `${user}@${host}` : host, "--", "true");
+    const child = spawn("ssh", args, { stdio: "ignore" });
+    const timer = setTimeout(() => { child.kill("SIGTERM"); resolve(false); }, timeoutMs + 1000);
+    child.on("close", (code) => { clearTimeout(timer); resolve(code === 0); });
+    child.on("error", () => { clearTimeout(timer); resolve(false); });
+  });
+}
+
+async function getNagentAuthorizedKeysLine(): Promise<string> {
+  const id = await readIdentity();
+  if (!id) throw new Error("no nagent identity — run `nagent` once to bootstrap");
+  const kp = await loadSshKeypair(id.nodeId);
+  return kp.authorizedKeysLine;
+}
+
+async function installPubkey(sshTarget: string): Promise<void> {
+  const line = await getNagentAuthorizedKeysLine();
+  const { user, host, port } = splitSshTarget(sshTarget);
+  // Append idempotently. Pipe the line via stdin so we don't have to fight
+  // ssh's argv→string flattening on the remote shell.
+  const remoteCmd =
+    'KEY=$(cat); ' +
+    'umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh; ' +
+    'touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys; ' +
+    'if ! grep -qF -- "$KEY" ~/.ssh/authorized_keys; then printf "%s\\n" "$KEY" >> ~/.ssh/authorized_keys; fi';
+  const args = ["-o", "StrictHostKeyChecking=accept-new"];
+  if (port) args.push("-p", String(port));
+  args.push(user ? `${user}@${host}` : host, "--", remoteCmd);
+
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn("ssh", args, { stdio: ["pipe", "inherit", "inherit"] });
+    child.stdin.write(line + "\n");
+    child.stdin.end();
+    child.on("close", (code) => code === 0 ? resolve() : reject(new Error(`ssh exited ${code}`)));
+    child.on("error", reject);
+  });
 }
 
 export async function cmdRelayListAllowed(): Promise<void> {

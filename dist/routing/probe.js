@@ -1,8 +1,10 @@
 // Probe round implementation: TCP-connect each known peer + pull every
 // pinned relay's STATUS_OK. Writes the result to ~/.nagent/nets/<netId>/path-table.json.
 import { connect as netConnect } from "node:net";
+import { spawn } from "node:child_process";
 import { paths } from "../platform/paths.js";
 import { readJson, writeJson } from "../store/json.js";
+import { readPinnedRelays } from "../relay/pinned.js";
 import { EMPTY_PATH_TABLE, } from "./index.js";
 const DEFAULT_TIMEOUT_MS = 1_500;
 /**
@@ -52,7 +54,7 @@ export async function runProbeRound(opts) {
             ? { ms: null, lastFailedAt: new Date().toISOString() }
             : { ms, lastOk: new Date().toISOString() };
     });
-    // Relay STATUS pulls.
+    // Relay STATUS pulls (TLS-transport, v0.5).
     const relays = {};
     if (opts.relayClient) {
         const names = opts.relayNames ?? [];
@@ -78,6 +80,31 @@ export async function runProbeRound(opts) {
             }
         }
     }
+    // ssh-jump probes (v0.5.1). Each pinned ssh-jump relay × each peer:
+    //   ssh -J <sshTarget> nagent.<peer> -- true   timed wall-clock.
+    // The relay's own myRttMs is a TCP-connect to the relay's port 22.
+    const sshJumpRelays = opts.sshJumpRelays
+        ?? (await readPinnedRelays()).filter((r) => r.transport === "ssh-jump");
+    if (sshJumpRelays.length > 0) {
+        const sshJumpTimeoutMs = opts.sshJumpTimeoutMs ?? 6000;
+        for (const relay of sshJumpRelays) {
+            const { host, port } = parseSshTargetForTcpProbe(relay.sshTarget);
+            const myRttMs = await probeDirect(host, port, opts.directTimeoutMs);
+            const peerMap = {};
+            const pairs = otherPeers.map((p) => ({ peer: p, relay }));
+            await runWithConcurrency(pairs, 4, async ({ peer }) => {
+                const ms = await probeSshJump(relay.sshTarget, `nagent.${peer.nodeName}`, sshJumpTimeoutMs);
+                peerMap[peer.nodeName] = ms === null
+                    ? { ms: null, lastSeen: new Date(0).toISOString() }
+                    : { ms, lastSeen: new Date().toISOString() };
+            });
+            relays[relay.name] = {
+                myRttMs,
+                lastSeen: new Date().toISOString(),
+                peers: peerMap,
+            };
+        }
+    }
     const table = {
         ...EMPTY_PATH_TABLE,
         node: opts.selfNodeName,
@@ -94,9 +121,63 @@ export async function readPathTable(netId) {
         return { ...EMPTY_PATH_TABLE };
     return t;
 }
+/**
+ * Time a `ssh -J <target> <sshHost> -- true` wall-clock round trip. Returns
+ * the ms or null on failure / timeout. This is the same path the production
+ * attach would take, so the measurement reflects user-experienced latency.
+ */
+export function probeSshJump(sshJumpTarget, sshHost, timeoutMs) {
+    return new Promise((resolve) => {
+        const start = process.hrtime.bigint();
+        const args = [
+            "-o", "BatchMode=yes",
+            "-o", `ConnectTimeout=${Math.max(1, Math.ceil(timeoutMs / 1000))}`,
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-J", sshJumpTarget,
+            sshHost,
+            "--",
+            "true",
+        ];
+        const child = spawn("ssh", args, { stdio: "ignore" });
+        let settled = false;
+        const done = (ms) => {
+            if (settled)
+                return;
+            settled = true;
+            try {
+                child.kill("SIGTERM");
+            }
+            catch { /* */ }
+            resolve(ms);
+        };
+        const timer = setTimeout(() => done(null), timeoutMs + 1000);
+        child.on("close", (code) => {
+            clearTimeout(timer);
+            if (code === 0) {
+                const ns = process.hrtime.bigint() - start;
+                done(Number(ns / 1000n) / 1_000);
+            }
+            else {
+                done(null);
+            }
+        });
+        child.on("error", () => { clearTimeout(timer); done(null); });
+    });
+}
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+function parseSshTargetForTcpProbe(target) {
+    // `user@host` or `user@host:port` — strip the user, default port 22.
+    const at = target.indexOf("@");
+    const hostPart = at >= 0 ? target.slice(at + 1) : target;
+    const colon = hostPart.lastIndexOf(":");
+    if (colon < 0)
+        return { host: hostPart, port: 22 };
+    const host = hostPart.slice(0, colon);
+    const port = Number(hostPart.slice(colon + 1));
+    return { host, port: Number.isInteger(port) && port > 0 ? port : 22 };
+}
 function splitHostPort(s) {
     const lastColon = s.lastIndexOf(":");
     if (lastColon < 0)

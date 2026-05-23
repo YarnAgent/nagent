@@ -9,7 +9,7 @@ import { writeJson, readJson, readJson as _readJson } from "../store/json.js";
 import { ensureNagentRoot, readIdentity, readActiveState } from "../store/index.js";
 import { loadSshKeypair } from "../ssh/identity.js";
 import { RelayClient } from "../relay/client.js";
-import { readPinnedRelays } from "../relay/pinned.js";
+import { readPinnedTlsRelays } from "../relay/pinned.js";
 import { runProbeRound } from "../routing/probe.js";
 import type {
   BusFrame,
@@ -113,7 +113,9 @@ export class Daemon {
   // -------------------------------------------------------------------------
 
   private async startRelaySubsystem(): Promise<void> {
-    const pinned = await readPinnedRelays();
+    // Only TLS-transport relays need a long-lived RelayClient. ssh-jump
+    // relays are stateless from the daemon's POV — invoked per-attach.
+    const pinned = await readPinnedTlsRelays();
     if (pinned.length === 0) {
       // No relays pinned, but we still want the probe loop for direct-only
       // path-table data (`nagent path status` populated even on Tailscale-only
