@@ -1,5 +1,19 @@
-// Probe round implementation: TCP-connect each known peer + pull every
-// pinned relay's STATUS_OK. Writes the result to ~/.nagent/nets/<netId>/path-table.json.
+// Probe round: measure real end-to-end latency on every candidate transport.
+//
+// v0.5.0 (TCP-only direct probe) returned wildly different units across
+// transports — direct was ~ms (TCP SYN/SYN-ACK/ACK), via-relay was ~seconds
+// (full ssh-through-ssh). Selection still worked because ordering was
+// preserved, but the user-facing numbers were misleading.
+//
+// v0.5.2 unifies on **real SSH round-trip** as the canonical metric for
+// every transport. Both probes run `ssh [extra-args] <sshHost> -- true` and
+// time the wall clock. That captures TCP + SSH handshake + auth + channel
+// open + exec + teardown — the same cost an `nagent attach` pays at
+// startup. Now `direct=0.6ms` vs `via:relay=1285ms` reads as a real
+// 2000× gap, not "we measured different things".
+//
+// Cheap TCP-connect lives on as a fast-fail pre-check: if the peer's port
+// is closed, skip the (much more expensive) SSH probe and mark unreachable.
 
 import { connect as netConnect, type Socket } from "node:net";
 import { spawn } from "node:child_process";
@@ -16,13 +30,21 @@ import {
   type RelaySample,
 } from "./index.js";
 
-const DEFAULT_TIMEOUT_MS = 1_500;
+const DEFAULT_TCP_TIMEOUT_MS = 1_500;
+const DEFAULT_SSH_PROBE_TIMEOUT_MS = 6_000;
+const DIRECT_CONCURRENCY = 4;
+const VIA_RELAY_CONCURRENCY = 4;
+
+// ---------------------------------------------------------------------------
+// Public probe primitives
+// ---------------------------------------------------------------------------
 
 /**
- * One-shot TCP handshake against `host:port`; returns the connect time in ms,
- * or `null` on failure or timeout.
+ * Cheap TCP 3-way handshake against `host:port`. Used as a fast-fail before
+ * the expensive `probeDirectSsh`. Returns connect time in ms or null on
+ * failure / timeout.
  */
-export function probeDirect(host: string, port: number, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<number | null> {
+export function probeDirectTcp(host: string, port: number, timeoutMs = DEFAULT_TCP_TIMEOUT_MS): Promise<number | null> {
   return new Promise((resolve) => {
     const start = process.hrtime.bigint();
     let settled = false;
@@ -37,11 +59,47 @@ export function probeDirect(host: string, port: number, timeoutMs = DEFAULT_TIME
     sock.once("connect", () => {
       clearTimeout(timer);
       const ns = process.hrtime.bigint() - start;
-      done(Number(ns / 1_000n) / 1_000); // µs → ms with one decimal of precision via the implicit division
+      done(Number(ns / 1_000n) / 1_000);
     });
     sock.once("error", () => { clearTimeout(timer); done(null); });
   });
 }
+
+/**
+ * Real-latency probe: time `ssh <sshHost> -- true` end-to-end. The same
+ * shape `nagent attach` uses, minus the PTY/cmd payload. Returns ms or null.
+ */
+export function probeDirectSsh(sshHost: string, timeoutMs = DEFAULT_SSH_PROBE_TIMEOUT_MS): Promise<number | null> {
+  return timedSshExec(sshHost, [], timeoutMs);
+}
+
+/**
+ * Same shape, via the ssh-jump relay. The ProxyCommand-with-nagent-identity
+ * args mirror what `resolveSshTransportArgs` emits at attach time, so the
+ * measurement is what users actually experience.
+ */
+export function probeSshJump(
+  sshJumpTarget: string,
+  sshHost: string,
+  timeoutMs = DEFAULT_SSH_PROBE_TIMEOUT_MS,
+  hostNameOverride?: string,
+): Promise<number | null> {
+  const nagentKey = paths().sshKey;
+  const extra = [
+    "-o",
+    `ProxyCommand=ssh -i ${nagentKey} -o IdentitiesOnly=yes -o BatchMode=yes ` +
+      `-o StrictHostKeyChecking=accept-new -W %h:%p ${sshJumpTarget}`,
+  ];
+  if (hostNameOverride) extra.push("-o", `HostName=${hostNameOverride}`);
+  return timedSshExec(sshHost, extra, timeoutMs);
+}
+
+/** Backward-compat alias for callers that haven't switched yet. Prefer probeDirectTcp. */
+export const probeDirect = probeDirectTcp;
+
+// ---------------------------------------------------------------------------
+// Probe round — runs every interval (or on `nagent path probe`)
+// ---------------------------------------------------------------------------
 
 export interface RunProbeOpts {
   netId: string;
@@ -52,36 +110,46 @@ export interface RunProbeOpts {
   relayClient?: RelayClient;
   /** Names of pinned TLS relays to query. Defaults to relayClient's connected set. */
   relayNames?: string[];
-  /** Per-probe TCP timeout. */
-  directTimeoutMs?: number;
-  /** Per-ssh-jump-probe wall-clock timeout (ms). Default 6000. */
-  sshJumpTimeoutMs?: number;
-  /** Override which pinned ssh-jump relays to probe. Tests use this; in production, read from pinned-relays.json. */
+  /** TCP-fast-fail timeout (ms). Default 1500. */
+  tcpProbeTimeoutMs?: number;
+  /** SSH-probe wall-clock timeout (ms). Default 6000. */
+  sshProbeTimeoutMs?: number;
+  /** Override which pinned ssh-jump relays to probe. */
   sshJumpRelays?: SshJumpPinnedRelay[];
+  /** @deprecated use `tcpProbeTimeoutMs`. Kept for backward compat. */
+  directTimeoutMs?: number;
+  /** @deprecated use `sshProbeTimeoutMs`. Kept for backward compat. */
+  sshJumpTimeoutMs?: number;
 }
 
-/**
- * Run one full probe round and persist the result. Safe to call repeatedly;
- * each call overwrites path-table.json atomically.
- */
 export async function runProbeRound(opts: RunProbeOpts): Promise<PathTable> {
   const peers =
     opts.peers ?? (await readJson<Peer[]>(paths().netPeers(opts.netId))) ?? [];
   const otherPeers = peers.filter((p) => p.nodeName !== opts.selfNodeName);
 
-  // Direct probes — bounded concurrency 8.
+  const tcpTimeoutMs = opts.tcpProbeTimeoutMs ?? opts.directTimeoutMs ?? DEFAULT_TCP_TIMEOUT_MS;
+  const sshTimeoutMs = opts.sshProbeTimeoutMs ?? opts.sshJumpTimeoutMs ?? DEFAULT_SSH_PROBE_TIMEOUT_MS;
+
+  // ---- Direct probes (TCP fast-fail → real SSH handshake) ----
   const direct: Record<string, DirectSample> = {};
-  await runWithConcurrency(otherPeers, 8, async (peer) => {
+  await runWithConcurrency(otherPeers, DIRECT_CONCURRENCY, async (peer) => {
     const target = peer.addresses[0];
-    if (!target) return;
-    const { host, port } = splitHostPort(target);
-    const ms = await probeDirect(host, port, opts.directTimeoutMs);
+    if (target) {
+      const { host, port } = splitHostPort(target);
+      const tcpOk = await probeDirectTcp(host, port, tcpTimeoutMs);
+      if (tcpOk === null) {
+        direct[peer.nodeName] = { ms: null, lastFailedAt: new Date().toISOString() };
+        return;
+      }
+    }
+    const sshHost = `nagent.${peer.nodeName}`;
+    const ms = await probeDirectSsh(sshHost, sshTimeoutMs);
     direct[peer.nodeName] = ms === null
       ? { ms: null, lastFailedAt: new Date().toISOString() }
       : { ms, lastOk: new Date().toISOString() };
   });
 
-  // Relay STATUS pulls (TLS-transport, v0.5).
+  // ---- TLS-relay STATUS pulls (v0.5; PING/PONG-based, already comparable) ----
   const relays: Record<string, RelaySample> = {};
   if (opts.relayClient) {
     const names = opts.relayNames ?? [];
@@ -94,48 +162,37 @@ export async function runProbeRound(opts: RunProbeOpts): Promise<PathTable> {
           if (p.node === opts.selfNodeName) continue;
           peerMap[p.node] = { ms: p.rttMs, lastSeen: p.lastSeen };
         }
-        relays[name] = {
-          myRttMs: myRtt,
-          lastSeen: new Date().toISOString(),
-          peers: peerMap,
-        };
+        relays[name] = { myRttMs: myRtt, lastSeen: new Date().toISOString(), peers: peerMap };
       } catch {
-        // Relay not connected / status timed out — record what we have.
         relays[name] = { myRttMs: myRtt, lastSeen: new Date(0).toISOString(), peers: {} };
       }
     }
   }
 
-  // ssh-jump probes (v0.5.1). Each pinned ssh-jump relay × each peer:
-  // time a real `ssh <jump-via-ProxyCommand> <peer> -- true` round-trip.
-  // The relay's own myRttMs is a TCP-connect to the relay's port 22.
+  // ---- ssh-jump probes (v0.5.1; real ssh-through-ssh) ----
   const sshJumpRelays = opts.sshJumpRelays
     ?? (await readPinnedRelays()).filter((r): r is SshJumpPinnedRelay => r.transport === "ssh-jump");
   if (sshJumpRelays.length > 0) {
-    const sshJumpTimeoutMs = opts.sshJumpTimeoutMs ?? 6000;
     for (const relay of sshJumpRelays) {
       const { host, port } = parseSshTargetForTcpProbe(relay.sshTarget);
-      const myRttMs = await probeDirect(host, port, opts.directTimeoutMs);
+      const myRttMs = await probeDirectTcp(host, port, tcpTimeoutMs);
       const peerMap: Record<string, { ms: number | null; lastSeen: string }> = {};
-      const pairs = otherPeers.map((p) => ({ peer: p, relay }));
-      await runWithConcurrency(pairs, 4, async ({ peer }) => {
-        // Prefer the Tailscale MagicDNS FQDN if we can find one — that's
-        // what the relay can actually resolve. Fall back to nagent.<peer>
-        // (which only works if the relay happens to have an Include for our
-        // ssh_config, which it usually doesn't).
-        const magic = await magicDnsFor(peer.nodeName);
-        const target = magic ? `nagent.${peer.nodeName}` : `nagent.${peer.nodeName}`;
-        const hostOverride = magic ?? undefined;
-        const ms = await probeSshJump(relay.sshTarget, target, sshJumpTimeoutMs, hostOverride);
-        peerMap[peer.nodeName] = ms === null
-          ? { ms: null, lastSeen: new Date(0).toISOString() }
-          : { ms, lastSeen: new Date().toISOString() };
-      });
-      relays[relay.name] = {
-        myRttMs,
-        lastSeen: new Date().toISOString(),
-        peers: peerMap,
-      };
+      // Skip per-peer probes if the relay itself is unreachable — saves the
+      // full sshProbeTimeoutMs × peerCount wait when relay is down.
+      if (myRttMs !== null) {
+        const pairs = otherPeers.map((p) => ({ peer: p, relay }));
+        await runWithConcurrency(pairs, VIA_RELAY_CONCURRENCY, async ({ peer }) => {
+          const magic = await magicDnsFor(peer.nodeName);
+          const ms = await probeSshJump(relay.sshTarget, `nagent.${peer.nodeName}`, sshTimeoutMs, magic ?? undefined);
+          peerMap[peer.nodeName] = ms === null
+            ? { ms: null, lastSeen: new Date(0).toISOString() }
+            : { ms, lastSeen: new Date().toISOString() };
+        });
+      } else {
+        // Relay unreachable — mark all peers under it as null.
+        for (const p of otherPeers) peerMap[p.nodeName] = { ms: null, lastSeen: new Date(0).toISOString() };
+      }
+      relays[relay.name] = { myRttMs, lastSeen: new Date().toISOString(), peers: peerMap };
     }
   }
 
@@ -157,31 +214,28 @@ export async function readPathTable(netId: string): Promise<PathTable> {
   return t;
 }
 
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
 /**
- * Time a `ssh -o ProxyCommand=… <sshHost> -- true` wall-clock round trip.
- * Returns the ms or null on failure / timeout. Mirrors the production attach
- * args exactly (ProxyCommand-with-nagent-identity + optional HostName
- * override), so the measurement reflects what users actually experience.
+ * Spawn `ssh [extraArgs] <sshHost> -- true` with consistent flags
+ * (BatchMode, ConnectTimeout, accept-new host keys), and time the wall
+ * clock. Used by both probeDirectSsh and probeSshJump so the numbers are
+ * directly comparable.
  */
-export function probeSshJump(
-  sshJumpTarget: string,
-  sshHost: string,
-  timeoutMs: number,
-  hostNameOverride?: string,
-): Promise<number | null> {
+function timedSshExec(sshHost: string, extraArgs: string[], timeoutMs: number): Promise<number | null> {
   return new Promise((resolve) => {
     const start = process.hrtime.bigint();
-    const nagentKey = paths().sshKey;
     const args = [
       "-o", "BatchMode=yes",
       "-o", `ConnectTimeout=${Math.max(1, Math.ceil(timeoutMs / 1000))}`,
       "-o", "StrictHostKeyChecking=accept-new",
-      "-o",
-      `ProxyCommand=ssh -i ${nagentKey} -o IdentitiesOnly=yes -o BatchMode=yes ` +
-        `-o StrictHostKeyChecking=accept-new -W %h:%p ${sshJumpTarget}`,
+      ...extraArgs,
+      sshHost,
+      "--",
+      "true",
     ];
-    if (hostNameOverride) args.push("-o", `HostName=${hostNameOverride}`);
-    args.push(sshHost, "--", "true");
     const child = spawn("ssh", args, { stdio: "ignore" });
     let settled = false;
     const done = (ms: number | null): void => {
@@ -204,12 +258,7 @@ export function probeSshJump(
   });
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 function parseSshTargetForTcpProbe(target: string): { host: string; port: number } {
-  // `user@host` or `user@host:port` — strip the user, default port 22.
   const at = target.indexOf("@");
   const hostPart = at >= 0 ? target.slice(at + 1) : target;
   const colon = hostPart.lastIndexOf(":");

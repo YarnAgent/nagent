@@ -61,44 +61,45 @@ describe("runProbeRound — writes path-table.json with direct probes", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it("probes every non-self peer and persists the result", async () => {
-    // Spin up two reachable mini-servers as "alice" and "bob"; the third
-    // peer "ghost" points at a closed port.
+  it("TCP-fast-fail correctly marks unreachable peers as null", async () => {
+    // v0.5.2: direct probes now do TCP-fast-fail then real SSH handshake.
+    // We can't easily fake a working sshd in a unit test, but we can
+    // verify the TCP fast-fail short-circuits cleanly for closed ports
+    // (ghost) and that all non-self peers end up in the table.
     const aliceSrv = createServer();
-    const bobSrv = createServer();
     await new Promise<void>((r) => aliceSrv.listen(0, "127.0.0.1", r));
-    await new Promise<void>((r) => bobSrv.listen(0, "127.0.0.1", r));
     const alicePort = (aliceSrv.address() as { port: number }).port;
-    const bobPort = (bobSrv.address() as { port: number }).port;
 
     await writeFile(paths().netPeers("net-test"), JSON.stringify([
       { nodeName: "self",  pubKey: "self-pub",  addresses: [`127.0.0.1:9`],          roles: [] }, // self — skipped
       { nodeName: "alice", pubKey: "alice-pub", addresses: [`127.0.0.1:${alicePort}`], roles: [] },
-      { nodeName: "bob",   pubKey: "bob-pub",   addresses: [`127.0.0.1:${bobPort}`],   roles: [] },
       { nodeName: "ghost", pubKey: "ghost-pub", addresses: [`127.0.0.1:1`],            roles: [] }, // closed
     ]));
 
     const table = await runProbeRound({
       netId: "net-test",
       selfNodeName: "self",
-      directTimeoutMs: 500,
+      tcpProbeTimeoutMs: 500,
+      sshProbeTimeoutMs: 1000, // short — we expect SSH to fail anyway
     });
 
     expect(table.node).toBe("self");
-    expect(table.direct.alice?.ms).toBeGreaterThanOrEqual(0);
-    expect(table.direct.bob?.ms).toBeGreaterThanOrEqual(0);
-    expect(table.direct.ghost?.ms).toBeNull();
     expect(table.direct.self).toBeUndefined();
+    // alice: TCP succeeds → SSH probe runs (fails in test env, no real sshd) → null with lastFailedAt
+    // ghost: TCP fast-fails → null with lastFailedAt
+    expect(table.direct.alice).toBeDefined();
+    expect(table.direct.alice?.ms).toBeNull();
+    expect(table.direct.alice?.lastFailedAt).toBeDefined();
+    expect(table.direct.ghost).toBeDefined();
+    expect(table.direct.ghost?.ms).toBeNull();
+    expect(table.direct.ghost?.lastFailedAt).toBeDefined();
     expect(Object.keys(table.relays)).toEqual([]);
 
     // Round-trip: readPathTable returns what we wrote.
     const persisted = await readPathTable("net-test");
     expect(persisted.direct.alice?.ms).toBe(table.direct.alice?.ms);
 
-    await Promise.all([
-      new Promise<void>((r) => aliceSrv.close(() => r())),
-      new Promise<void>((r) => bobSrv.close(() => r())),
-    ]);
+    await new Promise<void>((r) => aliceSrv.close(() => r()));
   });
 
   it("returns an empty table when peers.json has only self", async () => {
