@@ -342,7 +342,17 @@ async function installPubkey(sshTarget) {
         'umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh; ' +
         'touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys; ' +
         'if ! grep -qF -- "$KEY" ~/.ssh/authorized_keys; then printf "%s\\n" "$KEY" >> ~/.ssh/authorized_keys; fi';
+    // Try the nagent key first (in case the operator already authorized this
+    // node from another box), then fall back to the user's default keys
+    // (typical first-time-from-this-box case where the user already has shell
+    // access via their personal key + we just want to add the nagent key on
+    // top). The `IdentitiesOnly=yes` prevents ssh from offering keys the
+    // server didn't ask for, which speeds up the auth retry.
     const args = ["-o", "StrictHostKeyChecking=accept-new"];
+    args.push("-i", paths().sshKey);
+    args.push("-o", "PreferredAuthentications=publickey");
+    // Don't set IdentitiesOnly so ssh can still fall back to the agent / default
+    // keys if the nagent key isn't authorized yet (the whole point of --copy-id).
     if (port)
         args.push("-p", String(port));
     args.push(user ? `${user}@${host}` : host, "--", remoteCmd);
