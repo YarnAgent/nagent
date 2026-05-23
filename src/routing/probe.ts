@@ -8,6 +8,7 @@ import { readJson, writeJson } from "../store/json.js";
 import type { Peer } from "../types/index.js";
 import type { RelayClient } from "../relay/client.js";
 import { readPinnedRelays, type SshJumpPinnedRelay } from "../relay/pinned.js";
+import { magicDnsFor } from "./tailscale.js";
 import {
   EMPTY_PATH_TABLE,
   type PathTable,
@@ -106,7 +107,7 @@ export async function runProbeRound(opts: RunProbeOpts): Promise<PathTable> {
   }
 
   // ssh-jump probes (v0.5.1). Each pinned ssh-jump relay × each peer:
-  //   ssh -J <sshTarget> nagent.<peer> -- true   timed wall-clock.
+  // time a real `ssh <jump-via-ProxyCommand> <peer> -- true` round-trip.
   // The relay's own myRttMs is a TCP-connect to the relay's port 22.
   const sshJumpRelays = opts.sshJumpRelays
     ?? (await readPinnedRelays()).filter((r): r is SshJumpPinnedRelay => r.transport === "ssh-jump");
@@ -118,7 +119,14 @@ export async function runProbeRound(opts: RunProbeOpts): Promise<PathTable> {
       const peerMap: Record<string, { ms: number | null; lastSeen: string }> = {};
       const pairs = otherPeers.map((p) => ({ peer: p, relay }));
       await runWithConcurrency(pairs, 4, async ({ peer }) => {
-        const ms = await probeSshJump(relay.sshTarget, `nagent.${peer.nodeName}`, sshJumpTimeoutMs);
+        // Prefer the Tailscale MagicDNS FQDN if we can find one — that's
+        // what the relay can actually resolve. Fall back to nagent.<peer>
+        // (which only works if the relay happens to have an Include for our
+        // ssh_config, which it usually doesn't).
+        const magic = await magicDnsFor(peer.nodeName);
+        const target = magic ? `nagent.${peer.nodeName}` : `nagent.${peer.nodeName}`;
+        const hostOverride = magic ?? undefined;
+        const ms = await probeSshJump(relay.sshTarget, target, sshJumpTimeoutMs, hostOverride);
         peerMap[peer.nodeName] = ms === null
           ? { ms: null, lastSeen: new Date(0).toISOString() }
           : { ms, lastSeen: new Date().toISOString() };
@@ -150,26 +158,30 @@ export async function readPathTable(netId: string): Promise<PathTable> {
 }
 
 /**
- * Time a `ssh -J <target> <sshHost> -- true` wall-clock round trip. Returns
- * the ms or null on failure / timeout. This is the same path the production
- * attach would take, so the measurement reflects user-experienced latency.
+ * Time a `ssh -o ProxyCommand=… <sshHost> -- true` wall-clock round trip.
+ * Returns the ms or null on failure / timeout. Mirrors the production attach
+ * args exactly (ProxyCommand-with-nagent-identity + optional HostName
+ * override), so the measurement reflects what users actually experience.
  */
 export function probeSshJump(
   sshJumpTarget: string,
   sshHost: string,
   timeoutMs: number,
+  hostNameOverride?: string,
 ): Promise<number | null> {
   return new Promise((resolve) => {
     const start = process.hrtime.bigint();
+    const nagentKey = paths().sshKey;
     const args = [
       "-o", "BatchMode=yes",
       "-o", `ConnectTimeout=${Math.max(1, Math.ceil(timeoutMs / 1000))}`,
       "-o", "StrictHostKeyChecking=accept-new",
-      "-J", sshJumpTarget,
-      sshHost,
-      "--",
-      "true",
+      "-o",
+      `ProxyCommand=ssh -i ${nagentKey} -o IdentitiesOnly=yes -o BatchMode=yes ` +
+        `-o StrictHostKeyChecking=accept-new -W %h:%p ${sshJumpTarget}`,
     ];
+    if (hostNameOverride) args.push("-o", `HostName=${hostNameOverride}`);
+    args.push(sshHost, "--", "true");
     const child = spawn("ssh", args, { stdio: "ignore" });
     let settled = false;
     const done = (ms: number | null): void => {

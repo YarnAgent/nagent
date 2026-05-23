@@ -140,6 +140,10 @@ export function transportLabel(t: Transport): string {
 export interface TransportArgsExtras {
   pinnedKind?: "tls" | "ssh-jump";
   sshJumpTarget?: string;
+  /** Path to the ed25519 private key the jump hop should authenticate with. */
+  jumpIdentityFile?: string;
+  /** Override the target host the relay forwards to (e.g. Tailscale MagicDNS FQDN). */
+  targetHostOverride?: string;
 }
 
 export function transportSshArgs(
@@ -152,7 +156,23 @@ export function transportSshArgs(
     if (!extras.sshJumpTarget) {
       throw new Error(`ssh-jump transport requires sshJumpTarget (relay="${transport.relay}")`);
     }
-    return ["-J", extras.sshJumpTarget];
+    const args: string[] = [];
+    // -J doesn't propagate -i to the jump host (per ssh(1)), so use an explicit
+    // ProxyCommand with the nagent identity. This makes the jump hop work even
+    // when the user's default ssh keys aren't in the relay's authorized_keys.
+    const jumpKey = extras.jumpIdentityFile ? `-i ${shellSingleQuote(extras.jumpIdentityFile)} ` : "";
+    args.push(
+      "-o",
+      `ProxyCommand=ssh ${jumpKey}-o IdentitiesOnly=yes -o BatchMode=yes ` +
+        `-o StrictHostKeyChecking=accept-new -W %h:%p ${extras.sshJumpTarget}`,
+    );
+    // Override the resolved HostName when we have a relay-routable name (e.g.,
+    // a Tailscale MagicDNS FQDN). peers.json typically stores LAN IPs that
+    // aren't reachable from the relay's network.
+    if (extras.targetHostOverride) {
+      args.push("-o", `HostName=${extras.targetHostOverride}`);
+    }
+    return args;
   }
   const peer = shellSingleQuote(targetPeer);
   const relay = shellSingleQuote(transport.relay);

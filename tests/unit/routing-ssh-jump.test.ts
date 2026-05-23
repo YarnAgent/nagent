@@ -125,13 +125,45 @@ describe("transportSshArgs — branches on pinnedKind", () => {
     ]);
   });
 
-  it("via + ssh-jump renders -J <sshTarget>", () => {
+  it("via + ssh-jump renders ProxyCommand-with-identity to the jump host", () => {
     const args = transportSshArgs(
       { type: "via", relay: "tencent-cn" },
       "alice",
       { pinnedKind: "ssh-jump", sshJumpTarget: "ubuntu@101.43.123.138" },
     );
-    expect(args).toEqual(["-J", "ubuntu@101.43.123.138"]);
+    expect(args[0]).toBe("-o");
+    expect(args[1]).toMatch(/^ProxyCommand=ssh /);
+    expect(args[1]).toMatch(/ -W %h:%p ubuntu@101\.43\.123\.138$/);
+  });
+
+  it("via + ssh-jump with jumpIdentityFile embeds -i <path> in ProxyCommand", () => {
+    const args = transportSshArgs(
+      { type: "via", relay: "tencent-cn" },
+      "alice",
+      {
+        pinnedKind: "ssh-jump",
+        sshJumpTarget: "ubuntu@101.43.123.138",
+        jumpIdentityFile: "/etc/nagent/id_ed25519",
+      },
+    );
+    expect(args[1]).toContain("-i '/etc/nagent/id_ed25519'");
+    expect(args[1]).toContain("-o IdentitiesOnly=yes");
+  });
+
+  it("via + ssh-jump with targetHostOverride adds -o HostName=…", () => {
+    const args = transportSshArgs(
+      { type: "via", relay: "tencent-cn" },
+      "alice",
+      {
+        pinnedKind: "ssh-jump",
+        sshJumpTarget: "ubuntu@h",
+        targetHostOverride: "alice.tail0a1b2c.ts.net",
+      },
+    );
+    expect(args).toEqual([
+      "-o", expect.stringMatching(/^ProxyCommand=ssh /),
+      "-o", "HostName=alice.tail0a1b2c.ts.net",
+    ]);
   });
 
   it("via without extras defaults to tls (ProxyCommand)", () => {
@@ -165,7 +197,7 @@ describe("resolveSshTransportArgs — end-to-end with pinned lookup", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it("returns -J <target> when path-table picks an ssh-jump relay", async () => {
+  it("returns ProxyCommand-with-identity to jump host when path-table picks an ssh-jump relay", async () => {
     await setupActiveNet("net-a");
     await setupPinnedFile({
       "tencent-cn": { transport: "ssh-jump", sshTarget: "ubuntu@1.2.3.4", pinnedAt: "x" },
@@ -175,7 +207,8 @@ describe("resolveSshTransportArgs — end-to-end with pinned lookup", () => {
       relays: { "tencent-cn": { myRttMs: 20, lastSeen: "x", peers: { alice: { ms: 30, lastSeen: "x" } } } },
     });
     const args = await resolveSshTransportArgs("alice");
-    expect(args).toEqual(["-J", "ubuntu@1.2.3.4"]);
+    expect(args[0]).toBe("-o");
+    expect(args[1]).toMatch(/^ProxyCommand=ssh -i .* -W %h:%p ubuntu@1\.2\.3\.4$/);
   });
 
   it("returns ProxyCommand when the chosen relay is TLS-transport", async () => {
@@ -204,14 +237,15 @@ describe("resolveSshTransportArgs — end-to-end with pinned lookup", () => {
     expect(await resolveSshTransportArgs("alice")).toEqual([]);
   });
 
-  it("forced --via ssh-jump relay yields -J even without path-table data", async () => {
+  it("forced --via ssh-jump relay yields ProxyCommand even without path-table data", async () => {
     await setupActiveNet("net-d");
     await setupPinnedFile({
       "tencent-cn": { transport: "ssh-jump", sshTarget: "ubuntu@1.2.3.4", pinnedAt: "x" },
     });
     await setupPathTable("net-d", { direct: {}, relays: {} });
     const args = await resolveSshTransportArgs("alice", { via: "tencent-cn" });
-    expect(args).toEqual(["-J", "ubuntu@1.2.3.4"]);
+    expect(args[0]).toBe("-o");
+    expect(args[1]).toMatch(/ -W %h:%p ubuntu@1\.2\.3\.4$/);
   });
 
   it("forced --via unknown-relay falls through to ProxyCommand (fail-loud at ssh time)", async () => {

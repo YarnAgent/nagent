@@ -7,8 +7,10 @@
 // record to discriminate `tls` (ProxyCommand) vs `ssh-jump` (-J).
 
 import { readActiveState } from "../store/index.js";
+import { paths } from "../platform/paths.js";
 import { readPathTable } from "./probe.js";
 import { findPinnedRelay } from "../relay/pinned.js";
+import { magicDnsFor } from "./tailscale.js";
 import { chooseTransport, transportSshArgs, type Transport } from "./index.js";
 
 export interface ResolveTransportOpts {
@@ -44,9 +46,15 @@ async function renderArgs(transport: Transport, targetPeer: string): Promise<str
   if (transport.type === "direct") return [];
   const pinned = await findPinnedRelay(transport.relay);
   if (pinned?.transport === "ssh-jump") {
+    // Try to find a relay-resolvable name for the target. Tailscale MagicDNS
+    // FQDNs are universally reachable from any tailscaled-running box, which
+    // is what the relay typically is.
+    const targetHostOverride = (await magicDnsFor(targetPeer)) ?? undefined;
     return transportSshArgs(transport, targetPeer, {
       pinnedKind: "ssh-jump",
       sshJumpTarget: pinned.sshTarget,
+      jumpIdentityFile: paths().sshKey,
+      ...(targetHostOverride ? { targetHostOverride } : {}),
     });
   }
   // Default (and explicit tls): ProxyCommand path.
