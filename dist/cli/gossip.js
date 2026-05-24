@@ -4,6 +4,7 @@ import { isReplay } from "../gossip/replay_cache.js";
 import { appendAuthorizedKey, } from "../ssh/authorized_keys.js";
 import { sshAuthorizedKeysLine, } from "../ssh/identity.js";
 import { ensureUserSshConfigInclude, writeHostEntry, } from "../ssh/ssh_config.js";
+import { preferAddress } from "../ssh/addresses.js";
 import { readActiveState, readIdentity, readNetMeta, readPeers, writePeers, } from "../store/index.js";
 import { readJson } from "../store/json.js";
 import { paths } from "../platform/paths.js";
@@ -110,7 +111,7 @@ export async function applyGossipAdd(signed, now = new Date()) {
         peers.push(peerRecord);
     await writePeers(active.activeNetId, peers);
     await ensureUserSshConfigInclude();
-    const firstAddr = peerRecord.addresses[0];
+    const firstAddr = preferAddress(peerRecord.addresses);
     if (firstAddr) {
         const [host, portStr] = splitHostPort(firstAddr);
         await writeHostEntry({

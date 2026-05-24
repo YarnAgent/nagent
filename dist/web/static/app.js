@@ -159,19 +159,19 @@ function renderSessions(sessions) {
   }
 }
 
-async function mintToken(node, session) {
-  const r = await fetch("/api/token", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    credentials: "same-origin",
-    body: JSON.stringify({ node, session }),
-  });
-  if (!r.ok) {
-    const text = await r.text().catch(() => "");
-    throw new Error(`mint token failed (${r.status}): ${text}`);
-  }
-  const { token } = await r.json();
-  return token;
+/**
+ * Consume the bearer token from the `?t=` query parameter if it matches the
+ * requested (node, session). Returns null if no valid token is available.
+ * The `?t=` parameter is removed from the URL (via replaceState) after
+ * consumption so a page refresh won't replay a stale token.
+ */
+function consumeUrlToken(node, session) {
+  const url = new URL(location.href);
+  const t = url.searchParams.get("t");
+  if (!t) return null;
+  url.searchParams.delete("t");
+  history.replaceState(null, "", url.pathname + url.search + url.hash);
+  return t;
 }
 
 async function openSession(row) {
@@ -209,11 +209,9 @@ async function openSession(row) {
   term.open(terminalContainer);
   fit.fit();
 
-  let token;
-  try {
-    token = await mintToken(row.node, row.session.name);
-  } catch (err) {
-    term.write(`\r\n\x1b[31mfailed to mint token:\x1b[0m ${err}\r\n`);
+  let token = consumeUrlToken(row.node, row.session.name);
+  if (!token) {
+    term.write(`\r\n\x1b[33mno token — run on CLI:\x1b[0m\r\n  nagent web token --session ${row.node}/${row.session.name}\r\n\r\nOpen the printed URL in a browser to connect.\r\n`);
     return;
   }
 
@@ -287,4 +285,11 @@ function stringToBytes(s) {
 }
 
 loadInfo();
-loadSessions();
+loadSessions().then(() => {
+  const m = location.pathname.match(/^\/s\/([^/]+)\/([^/]+)$/);
+  if (!m) return;
+  const node = decodeURIComponent(m[1]);
+  const session = decodeURIComponent(m[2]);
+  const target = listEl.querySelector(`li[data-node="${CSS.escape(node)}"][data-session="${CSS.escape(session)}"]`);
+  if (target) target.click();
+});

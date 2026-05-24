@@ -4,6 +4,7 @@ import { promises as fs, existsSync } from "node:fs";
 import { connect as tlsConnect } from "node:tls";
 import { spawn } from "node:child_process";
 import { URL } from "node:url";
+import { dirname } from "node:path";
 import { paths } from "../platform/paths.js";
 import { RelayServer } from "../relay/server.js";
 import { addGrant, removeGrant, listGrants, } from "../relay/allowlist.js";
@@ -249,6 +250,7 @@ async function readPinnedRelaysRaw() {
     return { v: 1, relays: {} };
 }
 async function writePinnedRelaysRaw(store) {
+    await fs.mkdir(dirname(paths().pinnedRelays), { recursive: true });
     await fs.writeFile(paths().pinnedRelays, JSON.stringify(store, null, 2), { mode: 0o600 });
 }
 async function fetchCertFingerprint(host, port) {

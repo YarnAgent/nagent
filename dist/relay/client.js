@@ -60,13 +60,14 @@ export class RelayClient {
             return Promise.reject(new Error(`relay "${relayName}" is not registered`));
         }
         return new Promise((resolve, reject) => {
+            const onStatus = (s) => { clearTimeout(timer); resolve(s); };
             const timer = setTimeout(() => {
-                const i = conn.pendingStatus.indexOf(resolve);
+                const i = conn.pendingStatus.indexOf(onStatus);
                 if (i >= 0)
                     conn.pendingStatus.splice(i, 1);
                 reject(new Error(`STATUS timed out for "${relayName}"`));
             }, timeoutMs);
-            conn.pendingStatus.push((s) => { clearTimeout(timer); resolve(s); });
+            conn.pendingStatus.push(onStatus);
             try {
                 conn.socket.write(encodeJsonFrame(9 /* Verb.STATUS_REQ */, {}));
             }
@@ -504,6 +505,6 @@ function nowMicros() {
 }
 function parseUrl(url) {
     const u = new URL(url);
-    return { host: u.hostname, port: u.port ? Number(u.port) : 443 };
+    return { host: u.hostname, port: u.port ? Number(u.port) : 8443 };
 }
 //# sourceMappingURL=client.js.map
