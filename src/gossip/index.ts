@@ -128,14 +128,16 @@ export function buildGossipAdd(args: {
 export async function sendGossipAdd(
   sshHost: string,
   signed: SignedGossipAdd,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; extraSshArgs?: string[] } = {},
 ): Promise<GossipAck | GossipReject> {
   const timeoutMs = opts.timeoutMs ?? 8000;
+  const extraSshArgs = opts.extraSshArgs ?? [];
   return new Promise((resolve, reject) => {
     // Wrap in `"$SHELL" -ilc` so nvm / fnm / mise get sourced and nagent is on
     // PATH. macOS sshd doesn't source .zprofile for non-interactive commands,
     // and the user's login shell may be zsh (so `bash -ilc` won't help either).
     const args = [
+      ...extraSshArgs,
       "-o", "BatchMode=yes",
       "-o", `ConnectTimeout=${Math.ceil(timeoutMs / 1000)}`,
       sshHost,

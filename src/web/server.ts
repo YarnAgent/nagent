@@ -211,6 +211,12 @@ async function handleMintToken(
   res: import("node:http").ServerResponse,
   ctx: RouteContext,
 ): Promise<void> {
+  const apiKey = req.headers["x-api-key"] ?? "";
+  if (apiKey !== ctx.hmacSecret) {
+    res.writeHead(401, { "content-type": "text/plain" });
+    res.end("unauthorized — X-Api-Key required (use `nagent web token` to mint session URLs)");
+    return;
+  }
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {

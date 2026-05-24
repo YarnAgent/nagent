@@ -7,7 +7,7 @@ import { assertNotExpired, decodeAndVerify, } from "../invite/index.js";
 import { appendAuthorizedKey, removeAuthorizedKey, } from "../ssh/authorized_keys.js";
 import { loadSshKeypair, opensshEd25519Pem, sshAuthorizedKeysLine, } from "../ssh/identity.js";
 import { ensureUserSshConfigInclude, writeHostEntry, } from "../ssh/ssh_config.js";
-import { currentReachableAddresses } from "../ssh/addresses.js";
+import { currentReachableAddresses, preferAddress } from "../ssh/addresses.js";
 import { buildGossipAdd, runWithConcurrency, sendGossipAdd, signGossipAdd, } from "../gossip/index.js";
 import { readActiveState, readIdentity, readInvites, readNetMeta, readPeers, writeActiveState, writeInvites, writeNetMeta, writePeers, } from "../store/index.js";
 import { writeJson, readJson } from "../store/json.js";
@@ -285,7 +285,7 @@ export async function cmdJoinRespond(inviteId) {
     }
 }
 async function wireHostEntryForPeer(p) {
-    const first = p.addresses[0];
+    const first = preferAddress(p.addresses);
     if (!first)
         return;
     const [host, portStr] = splitHostPort(first);

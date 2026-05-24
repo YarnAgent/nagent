@@ -17,7 +17,7 @@ import { shellSingleQuote } from "../lib/shell.js";
  * verify the remote until we actually try, so a failure to find mosh-server
  * on the remote surfaces as a mosh error code.
  */
-export async function attachMosh(sshHost, remoteSession) {
+export async function attachMosh(sshHost, remoteSession, extraSshArgs = []) {
     const localProbe = spawnSync("which", ["mosh"], { encoding: "utf8" });
     if (localProbe.status !== 0) {
         throw new Error("mosh is not installed locally.\n" +
@@ -28,7 +28,15 @@ export async function attachMosh(sshHost, remoteSession) {
     }
     const innerCmd = `nagent attach ${shellSingleQuote(remoteSession)}`;
     const remoteCmd = `"$SHELL" -ilc ${shellSingleQuote(innerCmd)}`;
-    const r = spawnSync("mosh", [sshHost, "--", remoteCmd], { stdio: "inherit" });
+    // mosh has a --ssh option for extra ssh args; collapse the array into one
+    // shell-quoted string. Empty extras → no override.
+    const moshArgs = [];
+    if (extraSshArgs.length > 0) {
+        const sshCmd = ["ssh", ...extraSshArgs.map((a) => shellSingleQuote(a))].join(" ");
+        moshArgs.push(`--ssh=${sshCmd}`);
+    }
+    moshArgs.push(sshHost, "--", remoteCmd);
+    const r = spawnSync("mosh", moshArgs, { stdio: "inherit" });
     process.exit(r.status ?? 0);
 }
 /**
@@ -52,13 +60,13 @@ export async function attachMosh(sshHost, remoteSession) {
  *     not as a real PTY. The remote helper detects the pane's `alternate_screen`
  *     flag and warns at start-of-line if the user enters one.
  */
-export async function attachLine(sshHost, remoteSession) {
+export async function attachLine(sshHost, remoteSession, extraSshArgs = []) {
     const prompt = `[${sshHost.replace(/^nagent\./, "")}:${remoteSession}] $ `;
     const innerCmd = `nagent attach-line ${shellSingleQuote(remoteSession)}`;
     const remoteCmd = `"$SHELL" -ilc ${shellSingleQuote(innerCmd)}`;
     // -T: no PTY. We want raw stdio so we can pipe text both directions.
     // -o ServerAliveInterval=30: keep the long-lived SSH session alive.
-    const child = spawn("ssh", ["-T", "-o", "ServerAliveInterval=30", "-o", "BatchMode=yes", sshHost, "--", remoteCmd], { stdio: ["pipe", "pipe", "inherit"] });
+    const child = spawn("ssh", [...extraSshArgs, "-T", "-o", "ServerAliveInterval=30", "-o", "BatchMode=yes", sshHost, "--", remoteCmd], { stdio: ["pipe", "pipe", "inherit"] });
     // Set up the local readline interface bound to our terminal.
     const rl = createInterface({
         input: process.stdin,

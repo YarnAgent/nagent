@@ -37,3 +37,53 @@ export function parseAddressArg(arg: string, defaultPort = 22): ReachableAddress
   }
   return { host: arg, port: defaultPort };
 }
+
+/**
+ * Pick the best address from a peer's address list for ssh_config wiring.
+ *
+ * Preference order:
+ *   1. Tailscale CGNAT (100.64.0.0/10 — includes 100.64–127.x.x.x)
+ *   2. Other RFC1918 private addresses (10/8, 172.16/12, 192.168/16)
+ *   3. Anything else (public IPs, etc.)
+ *
+ * Fixes #4: previously `addresses[0]` was used, which on many hosts is a
+ * LAN or docker-bridge address that remote peers can't route to.
+ */
+export function preferAddress(addresses: string[]): string | undefined {
+  if (addresses.length === 0) return undefined;
+  if (addresses.length === 1) return addresses[0];
+  let bestScore = -1;
+  let best: string = addresses[0]!;
+  for (const addr of addresses) {
+    const host = addr.includes(":") ? addr.slice(0, addr.lastIndexOf(":")) : addr;
+    const score = addressScore(host);
+    if (score > bestScore) { bestScore = score; best = addr; }
+  }
+  return best;
+}
+
+function addressScore(host: string): number {
+  if (isTailscaleCgnat(host)) return 2;
+  if (isRfc1918(host)) return 1;
+  return 0;
+}
+
+function isTailscaleCgnat(ip: string): boolean {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return false;
+  const a = Number(parts[0]);
+  const b = Number(parts[1]);
+  if (a !== 100) return false;
+  return b >= 64 && b <= 127;
+}
+
+function isRfc1918(ip: string): boolean {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return false;
+  const a = Number(parts[0]);
+  const b = Number(parts[1]);
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  return false;
+}

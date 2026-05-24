@@ -8,6 +8,7 @@ import http from "node:http";
 import { WebSocket as WsClient } from "ws";
 import type { WebSocket as WsServer } from "ws";
 import { shellSingleQuote } from "../lib/shell.js";
+import { resolveSshTransportArgs } from "../routing/ssh-args.js";
 
 void createReadStream; // unused for now
 
@@ -140,7 +141,11 @@ export async function openTtydBridge(opts: BridgeOptions): Promise<void> {
   // directly, ignoring inherited PATH-modifying shell files.
   const innerCmd = `rm -f ${shellSingleQuote(remoteSock)}; ${remoteCmd}`;
   const wrappedCmd = `"$SHELL" -ilc ${shellSingleQuote(innerCmd)}`;
+  // v0.5: routing-aware. If the path-table picks a relay for this peer,
+  // prepend `-o ProxyCommand=nagent relay-dial …`. Direct (default) is empty.
+  const transportExtras = isSelfHosted ? [] : await resolveSshTransportArgs(peerNode);
   const sshArgs = [
+    ...transportExtras,
     "-o", "BatchMode=yes",
     "-o", "ServerAliveInterval=30",
     "-o", "ExitOnForwardFailure=yes",

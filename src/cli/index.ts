@@ -34,6 +34,18 @@ import { cmdGossipAddPeer } from "./gossip.js";
 import { attachLine, attachMosh } from "./attach_modes.js";
 import { cmdAttachLineServer } from "./attach_line_server.js";
 import { cmdWebServe, cmdWebStop, cmdWebToken, cmdWebTrust } from "./web.js";
+import {
+  cmdRelayServe,
+  cmdRelayStop,
+  cmdRelayAdd,
+  cmdRelayRemove,
+  cmdRelayList,
+  cmdRelayGrant,
+  cmdRelayRevoke,
+  cmdRelayListAllowed,
+  cmdRelayDial,
+} from "./relay.js";
+import { cmdPathStatus, cmdPathProbe } from "./path.js";
 import { shellSingleQuote } from "../lib/shell.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -149,6 +161,8 @@ async function cmdNew(name: string, opts: { project?: string | false; attach?: b
 interface AttachOpts {
   line?: boolean;
   mosh?: boolean;
+  /** v0.5: 'auto' | 'direct' | '<relay-name>' — overrides path-table selection. */
+  via?: string;
 }
 
 async function cmdAttach(name: string, opts: AttachOpts): Promise<void> {
@@ -186,13 +200,15 @@ async function attachRemote(peer: string, sess: string, opts: AttachOpts): Promi
   const target = list.find((p) => p.nodeName === peer);
   if (!target) throw new Error(`unknown peer: ${peer} (peers: ${list.map((p) => p.nodeName).join(", ")})`);
   const sshHost = `nagent.${peer}`;
+  const { resolveSshTransportArgs } = await import("../routing/ssh-args.js");
+  const extra = await resolveSshTransportArgs(peer, opts.via ? { via: opts.via } : {});
 
   if (opts.mosh) {
-    await attachMosh(sshHost, sess);
+    await attachMosh(sshHost, sess, extra);
     return; // attachMosh execs / exits
   }
   if (opts.line) {
-    await attachLine(sshHost, sess);
+    await attachLine(sshHost, sess, extra);
     return; // attachLine never resolves; exits on remote exit
   }
 
@@ -202,7 +218,7 @@ async function attachRemote(peer: string, sess: string, opts: AttachOpts): Promi
   const { spawnSync } = await import("node:child_process");
   const r = spawnSync(
     "ssh",
-    ["-t", sshHost, "--", remoteCmd],
+    [...extra, "-t", sshHost, "--", remoteCmd],
     { stdio: "inherit" },
   );
   process.exit(r.status ?? 0);
@@ -284,7 +300,7 @@ function printSessionsTable(sessions: import("../types/index.js").ListResultEntr
 }
 
 function printNetTable(
-  rows: Array<{ node: string; session: import("../types/index.js").ListResultEntry }>,
+  rows: Array<{ node: string; session: import("../types/index.js").ListResultEntry; via?: string }>,
   unreachable: string[],
 ): void {
   if (rows.length === 0 && unreachable.length === 0) {
@@ -295,13 +311,19 @@ function printNetTable(
   const nameWidth = Math.max(4, ...rows.map((r) => r.session.name.length));
   const addrWidth = Math.max(7, ...rows.map((r) => r.session.address.length));
   const projWidth = Math.max(7, ...rows.map((r) => (r.session.project ?? "-").length));
+  // Only render the VIA column when at least one row was reached via a relay.
+  // Keeps the common (all-direct) output unchanged.
+  const showVia = rows.some((r) => typeof r.via === "string" && r.via.length > 0);
+  const viaWidth = showVia ? Math.max(3, ...rows.map((r) => (r.via ?? "-").length)) : 0;
+  const viaHeader = showVia ? `  ${"VIA".padEnd(viaWidth)}` : "";
   process.stdout.write(
-    `${"NODE".padEnd(nodeWidth)}  ${"NAME".padEnd(nameWidth)}  ${"ADDRESS".padEnd(addrWidth)}  ${"PROJECT".padEnd(projWidth)}  ATT  ROLES\n`,
+    `${"NODE".padEnd(nodeWidth)}  ${"NAME".padEnd(nameWidth)}  ${"ADDRESS".padEnd(addrWidth)}  ${"PROJECT".padEnd(projWidth)}  ATT  ROLES${viaHeader}\n`,
   );
-  for (const { node, session: s } of rows) {
+  for (const { node, session: s, via } of rows) {
     const roles = s.roles.length ? s.roles.join(",") : "-";
+    const viaCell = showVia ? `  ${(via ?? "-").padEnd(viaWidth)}` : "";
     process.stdout.write(
-      `${node.padEnd(nodeWidth)}  ${s.name.padEnd(nameWidth)}  ${s.address.padEnd(addrWidth)}  ${(s.project ?? "-").padEnd(projWidth)}  ${String(s.attached).padStart(3)}  ${roles}\n`,
+      `${node.padEnd(nodeWidth)}  ${s.name.padEnd(nameWidth)}  ${s.address.padEnd(addrWidth)}  ${(s.project ?? "-").padEnd(projWidth)}  ${String(s.attached).padStart(3)}  ${roles}${viaCell}\n`,
     );
   }
   for (const node of unreachable) {
@@ -488,6 +510,7 @@ async function main(): Promise<void> {
     .description("attach to an existing session (local NAME or <peer>/<session>)")
     .option("--line", "[v0.3] line-buffered shell — no per-keystroke RTT, no TUI support")
     .option("--mosh", "[v0.3] use mosh transport — predictive local echo (requires mosh on both ends)")
+    .option("--via <name>", "[v0.5] force transport: 'auto' (default), 'direct', or a pinned relay name")
     .action(bootstrapped(async (name: string, opts: AttachOpts) => { await cmdAttach(name, opts); }));
 
   // Internal — server side of `attach … --line`. Reads command lines from
@@ -564,6 +587,100 @@ async function main(): Promise<void> {
     .action(bootstrapped(async (hubUrl: string, opts: { yes?: boolean }) => {
       await cmdWebTrust({ hubUrl, ...(opts.yes ? { yes: true } : {}) });
     }));
+
+  // ---------------- v0.5: nagent relay … ----------------
+  const relayCmd = program
+    .command("relay")
+    .description("[v0.5] dumb-pipe TCP rendezvous; lets non-tailnet peers reach each other via a public-IP box");
+
+  relayCmd
+    .command("serve")
+    .description("run the relay daemon on this box (TLS, self-signed cert pinned by clients)")
+    .option("--port <port>", "TCP port to listen on (default 8443; 0 = random)")
+    .option("--bind <addr>", "bind address (default 0.0.0.0)")
+    .option("--name <name>", "human-friendly relay name (default: this node's nodeName or hostname)")
+    .action(async (opts: { port?: string; bind?: string; name?: string }) => {
+      process.env.NAGENT_NO_BOOTSTRAP = "1"; // relay doesn't need the mesh identity to exist
+      await cmdRelayServe(opts);
+    });
+
+  relayCmd
+    .command("stop")
+    .description("stop the relay daemon running on this box")
+    .action(async () => { await cmdRelayStop(); });
+
+  relayCmd
+    .command("add <url-or-ssh-target>")
+    .description("pin a relay. https:// → TLS transport; ssh://user@host or user@host → ssh-jump transport")
+    .option("--name <name>", "store under this name (default: host portion of the input)")
+    .option("-y, --yes", "skip the confirmation prompt (TLS transport only)")
+    .option("--copy-id", "(ssh-jump) install the local nagent pubkey into the relay's authorized_keys via ssh")
+    .action(async (input: string, opts: { name?: string; yes?: boolean; copyId?: boolean }) => {
+      await cmdRelayAdd(input, opts);
+    });
+
+  relayCmd
+    .command("remove <name>")
+    .description("unpin a previously-added relay")
+    .action(async (name: string) => { await cmdRelayRemove(name); });
+
+  relayCmd
+    .command("list")
+    .description("list pinned relays (name, URL, fingerprint, when pinned)")
+    .action(async () => { await cmdRelayList(); });
+
+  relayCmd
+    .command("grant <node> <pubKey>")
+    .description("(on a relay) add an explicit allowlist entry — alternative to mesh peers.json")
+    .action(async (node: string, pubKey: string) => {
+      process.env.NAGENT_NO_BOOTSTRAP = "1";
+      await cmdRelayGrant(node, pubKey);
+    });
+
+  relayCmd
+    .command("revoke <node>")
+    .description("(on a relay) remove an explicit allowlist entry")
+    .action(async (node: string) => {
+      process.env.NAGENT_NO_BOOTSTRAP = "1";
+      await cmdRelayRevoke(node);
+    });
+
+  relayCmd
+    .command("list-allowed")
+    .description("(on a relay) print the explicit allowlist (does NOT include mesh peers.json)")
+    .action(async () => {
+      process.env.NAGENT_NO_BOOTSTRAP = "1";
+      await cmdRelayListAllowed();
+    });
+
+  // Hidden — used as ssh's ProxyCommand on the client side.
+  const relayDialCmd = program
+    .command("relay-dial <peer>")
+    .description("(ProxyCommand helper) stdio bridge to <peer> via a pinned relay")
+    .requiredOption("--relay <name>", "name of the pinned relay to use")
+    .action(async (peer: string, opts: { relay: string }) => {
+      process.env.NAGENT_NO_BOOTSTRAP = "1";
+      await cmdRelayDial(peer, opts);
+    });
+  (relayDialCmd as unknown as { _hidden: boolean })._hidden = true;
+
+  // ---------------- v0.5: nagent path … ----------------
+  const pathCmd = program
+    .command("path")
+    .description("[v0.5] inspect or refresh the latency-aware path-table");
+
+  pathCmd
+    .command("status [peer]")
+    .description("show the path-table; optionally focus on a single peer")
+    .option("--json", "machine-readable JSON output")
+    .action(bootstrapped(async (peer: string | undefined, opts: { json?: boolean }) => {
+      await cmdPathStatus({ ...(peer ? { peer } : {}), ...(opts.json ? { json: true } : {}) });
+    }));
+
+  pathCmd
+    .command("probe")
+    .description("run a one-shot direct probe round; relay STATUS pulls require the daemon")
+    .action(bootstrapped(async () => { await cmdPathProbe(); }));
 
   // Internal — only invoked via SSH `command=` restriction during a join.
   // Marked hidden so it doesn't appear in --help noise.

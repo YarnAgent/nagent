@@ -166,6 +166,12 @@ async function routeHttp(req, res, ctx) {
 const SPA_TOKEN_TTL_MS = 60 * 60 * 1000; // 1h
 const MAX_TOKEN_BODY = 1024;
 async function handleMintToken(req, res, ctx) {
+    const apiKey = req.headers["x-api-key"] ?? "";
+    if (apiKey !== ctx.hmacSecret) {
+        res.writeHead(401, { "content-type": "text/plain" });
+        res.end("unauthorized — X-Api-Key required (use `nagent web token` to mint session URLs)");
+        return;
+    }
     const chunks = [];
     let total = 0;
     for await (const chunk of req) {

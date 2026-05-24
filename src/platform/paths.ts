@@ -36,6 +36,15 @@ export function paths() {
     webConfig: join(root, "web.json"),
     webPid: join(root, "web", "hub.pid"),
     webKnownHubs: join(root, "web", "known_hubs.json"),
+    // v0.5 relay daemon + client
+    relayDir: join(root, "relay"),
+    relayCert: join(root, "relay", "cert.pem"),
+    relayKey: join(root, "relay", "key.pem"),
+    relayAllowlist: join(root, "relay", "allowlist.json"),
+    relayPid: join(root, "relay", "daemon.pid"),
+    relayClientSock: join(root, "relay-client.sock"),
+    pinnedRelays: join(root, "relays.json"),
+    pathTable: (netId: string) => join(root, "nets", netId, "path-table.json"),
   };
 }
 
