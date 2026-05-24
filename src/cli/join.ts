@@ -21,7 +21,7 @@ import {
   ensureUserSshConfigInclude,
   writeHostEntry,
 } from "../ssh/ssh_config.js";
-import { currentReachableAddresses } from "../ssh/addresses.js";
+import { currentReachableAddresses, preferAddress } from "../ssh/addresses.js";
 import {
   buildGossipAdd,
   runWithConcurrency,
@@ -334,7 +334,7 @@ export async function cmdJoinRespond(inviteId: string): Promise<void> {
 }
 
 async function wireHostEntryForPeer(p: Peer): Promise<void> {
-  const first = p.addresses[0];
+  const first = preferAddress(p.addresses);
   if (!first) return;
   const [host, portStr] = splitHostPort(first);
   await writeHostEntry({
