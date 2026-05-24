@@ -16,6 +16,7 @@ import { cmdJoin, cmdJoinRespond } from "./join.js";
 import { cmdGossipAddPeer } from "./gossip.js";
 import { attachLine, attachMosh } from "./attach_modes.js";
 import { cmdAttachLineServer } from "./attach_line_server.js";
+import { cmdWebServe, cmdWebStop, cmdWebToken, cmdWebTrust } from "./web.js";
 import { shellSingleQuote } from "../lib/shell.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 function readPackageVersion() {
@@ -467,6 +468,33 @@ async function main() {
         .command("join <token>")
         .description("join an existing net via an invite token")
         .action(bootstrapped(async (token) => { await cmdJoin(token); }));
+    const webCmd = program.command("web").description("[v0.4] browser access to mesh sessions (nagent-web hub)");
+    webCmd
+        .command("serve")
+        .description("start the nagent-web hub on this node (HTTPS, self-signed cert)")
+        .option("--port <port>", "TCP port to listen on (default 4443; 0 = random)")
+        .option("--bind <addr>", "bind address (default 0.0.0.0)")
+        .action(bootstrapped(async (opts) => { await cmdWebServe(opts); }));
+    webCmd
+        .command("stop")
+        .description("stop a running nagent-web hub on this node")
+        .action(async () => { await cmdWebStop(); });
+    webCmd
+        .command("token")
+        .description("mint a session-scoped bearer URL")
+        .requiredOption("--session <node/session>", "target session, formatted node/session")
+        .option("--expires <ttl>", "token TTL (e.g. 30s, 5m, 1h, 7d; default 1h)")
+        .option("--readonly", "issue a read-only token (browser cannot send keystrokes)")
+        .action(bootstrapped(async (opts) => {
+        await cmdWebToken(opts);
+    }));
+    webCmd
+        .command("trust <hub-url>")
+        .description("fetch + pin a hub's self-signed cert fingerprint on this client")
+        .option("-y, --yes", "skip the confirmation prompt")
+        .action(bootstrapped(async (hubUrl, opts) => {
+        await cmdWebTrust({ hubUrl, ...(opts.yes ? { yes: true } : {}) });
+    }));
     // Internal — only invoked via SSH `command=` restriction during a join.
     // Marked hidden so it doesn't appear in --help noise.
     const joinRespondCmd = program

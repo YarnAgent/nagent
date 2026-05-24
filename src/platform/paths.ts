@@ -29,6 +29,13 @@ export function paths() {
     netPeers: (netId: string) => join(root, "nets", netId, "peers.json"),
     netProjects: (netId: string) => join(root, "nets", netId, "projects.json"),
     netAuthority: (netId: string) => join(root, "nets", netId, "authority.json"),
+    // v0.4 web hub
+    webDir: join(root, "web"),
+    webCert: join(root, "web", "cert.pem"),
+    webKey: join(root, "web", "key.pem"),
+    webConfig: join(root, "web.json"),
+    webPid: join(root, "web", "hub.pid"),
+    webKnownHubs: join(root, "web", "known_hubs.json"),
   };
 }
 
